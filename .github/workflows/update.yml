@@ -2,7 +2,7 @@ name: Update V2Ray Subscription
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # كل 15 دقيقة
+    - cron: "7,37 * * * *"   # كل 30 دقيقة (بدقائق أقل زحمة)
   workflow_dispatch:         # تشغيل يدوي من تبويب Actions
   push:                      # تشغيل مباشر بعد أي تعديل على السكربت أو هذا الملف
     paths:
