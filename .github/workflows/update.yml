@@ -2,19 +2,24 @@ name: Update V2Ray Subscription
 
 on:
   schedule:
-    - cron: "0 * * * *"     # كل ساعة
+    - cron: "*/15 * * * *"   # كل 15 دقيقة
   workflow_dispatch:         # تشغيل يدوي من تبويب Actions
+  push:                      # تشغيل مباشر بعد أي تعديل على السكربت أو هذا الملف
+    paths:
+      - "scrape.py"
+      - ".github/workflows/update.yml"
 
 permissions:
   contents: write
 
 concurrency:
   group: update-sub
-  cancel-in-progress: false
+  cancel-in-progress: true   # لو فيه تشغيل قديم عالق، يلغيه ويبدأ الجديد
 
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,5 +36,6 @@ jobs:
             echo "لا يوجد تغيير"
           else
             git commit -m "Update subscription $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git pull --rebase -X theirs origin "${GITHUB_REF_NAME}" || true
             git push
           fi
