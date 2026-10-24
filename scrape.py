@@ -5,7 +5,10 @@
 
 المنابع (قابلة للتعديل من قسم الإعدادات):
   1) @TheFreeConfigs  -> آخر 50 كونفيج غير مكرر  -> Sabah 1   .. Sabah 50
-  2) @tootffarangi2   -> آخر 100 كونفيج غير مكرر -> Sabah 51  .. Sabah 150
+  2) @tootffarangi2   -> آخر 150 كونفيج غير مكرر -> Sabah 51  .. Sabah 200
+  المجموع: 200 كونفيج
+
+- سيرفرات الشادوساكس (ss:// و ssr://) يتم تخطيها ولا تدخل في العدد.
 
 المميزات:
 - حذف المكرر "الذكي": نفس السيرفر حتى لو اختلف ترتيب الباراميترات أو الاسم أو
@@ -31,13 +34,17 @@ from concurrent.futures import ThreadPoolExecutor
 
 # ===================== الإعدادات =====================
 NAME_PREFIX = "Sabah"        # الاسم الجديد
-MAX_PAGES = 40               # أقصى عدد صفحات يرجع لها في تاريخ كل قناة
+MAX_PAGES = 60               # أقصى عدد صفحات يرجع لها في تاريخ كل قناة
 
 # كل منبع: اسم القناة (بدون @) ، عدد الكونفيجات ، رقم أول كونفيج ، الإيموجي البديل
 SOURCES = [
     {"channel": "TheFreeConfigs", "count": 50,  "start": 1,  "fallback_emoji": "🌐"},
-    {"channel": "tootffarangi2",  "count": 100, "start": 51, "fallback_emoji": "🍓"},
+    {"channel": "tootffarangi2",  "count": 150, "start": 51, "fallback_emoji": "🍓"},
 ]
+
+# بروتوكولات يتم تخطيها تماماً (لا تدخل في الاشتراك ولا في العدد)
+# ss = Shadowsocks  ،  ssr = ShadowsocksR
+SKIP_PROTOCOLS = {"ss", "ssr"}
 
 USE_GEOIP = True             # True = حط علم دولة السيرفر الحقيقية (حسب الـ IP)
 # إذا الـ GeoIP قال إن السيرفر في هذه الدول وكان للكونفيج علم أصلي مختلف،
@@ -187,6 +194,11 @@ def parse_link(link):
     return {"key": "|".join(parts), "host": host, "name": name}
 
 
+def is_skipped(link):
+    """True إذا كان بروتوكول الرابط من البروتوكولات المحذوفة (مثل الشادوساكس)."""
+    return link.split("://", 1)[0].lower() in SKIP_PROTOCOLS
+
+
 def rename(link, new_name):
     scheme = link.split("://", 1)[0].lower()
     if scheme == "vmess":
@@ -224,6 +236,8 @@ def collect(source, seen):
         # الأحدث أولاً، مع الحفاظ على ترتيب الكونفيجات داخل نفس الرسالة
         for _msg_id, links in sorted(messages, key=lambda x: -x[0]):
             for link in links:
+                if is_skipped(link):
+                    continue
                 info = parse_link(link)
                 if not info or info["key"] in seen:
                     continue
@@ -301,6 +315,8 @@ def load_previous():
     except FileNotFoundError:
         return old
     for line in lines:
+        if is_skipped(line):
+            continue
         info = parse_link(line)
         if not info:
             continue
