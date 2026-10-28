@@ -4,9 +4,14 @@
 ويبني ملف اشتراك (Subscription) لبرنامج v2rayNG.
 
 المنابع (قابلة للتعديل من قسم الإعدادات):
-  1) @TheFreeConfigs  -> آخر 50 كونفيج غير مكرر  -> Sabah 1   .. Sabah 50
-  2) @tootffarangi2   -> آخر 150 كونفيج غير مكرر -> Sabah 51  .. Sabah 200
-  المجموع: 200 كونفيج
+  1) @TheFreeConfigs          -> آخر 50  -> Sabah 1   .. Sabah 50   (Free)
+  2) @tootffarangi2           -> آخر 100 -> Sabah 51  .. Sabah 150  (Toot)
+  3) @v2rei                   -> آخر 100 -> Sabah 151 .. Sabah 250  (V2rei)
+  4) @proxy_mtproto_vpns_free -> آخر 100 -> Sabah 251 .. Sabah 350  (Proxy)
+  5) @ettehad_vpn             -> آخر 100 -> Sabah 351 .. Sabah 450  (Etehad)
+  المجموع: 450 كونفيج
+
+شكل الاسم:  Sabah 151 🇩🇪 V2rei   (رقم + علم الدولة + اختصار القناة)
 
 - سيرفرات الشادوساكس (ss:// و ssr://) يتم تخطيها ولا تدخل في العدد.
 
@@ -16,30 +21,56 @@
   والحذف يكون عبر كل المنابع (كونفيج موجود في المنبع 1 لا يتكرر في المنبع 2).
 - علم الدولة: يحاول معرفة دولة السيرفر عن طريق IP (GeoIP) ويضع علمها.
   إذا ما قدر (CDN مثل Cloudflare أو فشل البحث) يستخدم العلم الأصلي من اسم
-  الكونفيج، وإذا ما فيه علم يستخدم إيموجي بديل.
-- إذا فشل أحد المنابع، يحتفظ بكونفيجاته القديمة بدل ما يمسحها.
-- يكتب:  sub.txt (Base64 - هذا رابط الاشتراك)  و  sub_raw.txt (نص عادي)
+  الكونفيج، وإذا ما فيه علم يستخدم إيموجي بديل خاص بالقناة.
+- اختصار اسم القناة في آخر اسم الكونفيج حتى تعرف هو من أي قناة.
+- تخطي السيرفرات ذات العناوين الداخلية/الوهمية (127.0.0.1 ، 10.x ، 0.0.0.0 ...).
+- إعادة المحاولة تلقائياً عند فشل الاتصال بتيليجرام (أو حظر مؤقت 429).
+- إذا فشل أحد المنابع، يحتفظ بكونفيجاته القديمة (حسب اختصار القناة) بدل ما يمسحها.
+- يكتب:
+    sub.txt            (Base64 - رابط الاشتراك الكامل)
+    sub_raw.txt        (نص عادي)
+    subs/<Tag>.txt     (اشتراك منفصل لكل قناة - Base64)
 
 لا يحتاج أي مكتبات خارجية.
 """
 import base64
 import html
+import ipaddress
 import json
+import os
 import re
 import socket
 import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 # ===================== الإعدادات =====================
 NAME_PREFIX = "Sabah"        # الاسم الجديد
-MAX_PAGES = 60               # أقصى عدد صفحات يرجع لها في تاريخ كل قناة
+MAX_PAGES = 60               # أقصى عدد صفحات يرجع لها في تاريخ كل قناة (افتراضي)
 
-# كل منبع: اسم القناة (بدون @) ، عدد الكونفيجات ، رقم أول كونفيج ، الإيموجي البديل
+# كل منبع:
+#   channel        : اسم القناة (بدون @)
+#   count          : عدد الكونفيجات
+#   start          : رقم أول كونفيج
+#   tag            : اختصار قصير يظهر في آخر الاسم (حروف/أرقام إنجليزية فقط بدون مسافات)
+#   fallback_emoji : إيموجي بديل إذا ما عُرف علم الدولة
+#   max_pages      : (اختياري) أقصى عدد صفحات لهذه القناة
+#   legacy_range   : (اختياري) أرقام هذه القناة في النسخة القديمة (قبل إضافة الاختصار)
+#                    تُستخدم مرة وحدة فقط للاحتفاظ بالقديم إذا فشل الجلب
 SOURCES = [
-    {"channel": "TheFreeConfigs", "count": 50,  "start": 1,  "fallback_emoji": "🌐"},
-    {"channel": "tootffarangi2",  "count": 150, "start": 51, "fallback_emoji": "🍓"},
+    {"channel": "TheFreeConfigs", "count": 50, "start": 1, "tag": "Free",
+     "fallback_emoji": "🌐", "legacy_range": (1, 50)},
+    {"channel": "tootffarangi2", "count": 100, "start": 51, "tag": "Toot",
+     "fallback_emoji": "🍓", "legacy_range": (51, 200)},
+    {"channel": "v2rei", "count": 100, "start": 151, "tag": "V2rei",
+     "fallback_emoji": "⚡"},
+    {"channel": "proxy_mtproto_vpns_free", "count": 100, "start": 251, "tag": "Proxy",
+     "fallback_emoji": "🔰", "max_pages": 80},
+    {"channel": "ettehad_vpn", "count": 100, "start": 351, "tag": "Etehad",
+     "fallback_emoji": "🔥"},
 ]
 
 # بروتوكولات يتم تخطيها تماماً (لا تدخل في الاشتراك ولا في العدد)
@@ -50,6 +81,10 @@ USE_GEOIP = True             # True = حط علم دولة السيرفر الح
 # إذا الـ GeoIP قال إن السيرفر في هذه الدول وكان للكونفيج علم أصلي مختلف،
 # نخلي العلم الأصلي (لأن هذه غالباً سيرفرات "تونل/ريلاي" والخروج الحقيقي برا)
 RELAY_COUNTRIES = {"IR"}
+
+SKIP_PRIVATE_HOSTS = True    # True = تخطي السيرفرات بعناوين داخلية/وهمية (127.0.0.1 ...)
+WRITE_PER_CHANNEL = True     # True = اكتب اشتراك منفصل لكل قناة في مجلد subs/
+PAGE_DELAY = 0.4             # ثواني بين كل صفحة وصفحة (حتى ما يحظرنا تيليجرام)
 # =====================================================
 
 PROTOCOLS = ["hysteria2", "hysteria", "wireguard", "vless", "vmess",
@@ -59,6 +94,7 @@ LINK_RE = re.compile(r'(?<![A-Za-z0-9])(?:%s)://[^\s<>"\'`]+' % "|".join(PROTOCO
                      re.IGNORECASE)
 FLAG_RE = re.compile("[\U0001F1E6-\U0001F1FF]{2}")
 NUM_RE = re.compile(r"^%s\s+(\d+)\b" % re.escape(NAME_PREFIX))
+TAGS = {s["tag"] for s in SOURCES}
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -74,13 +110,26 @@ CDN_WORDS = ("cloudflare", "fastly", "akamai", "cloudfront", "gcore", "g-core",
 
 
 # ----------------------------------------------------------------- أدوات عامة
-def fetch(url, data=None, timeout=30):
-    req = urllib.request.Request(url, data=data,
-                                 headers={"User-Agent": UA,
-                                          "Accept-Language": "en-US,en;q=0.9",
-                                          "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8", "replace")
+def fetch(url, data=None, timeout=30, retries=3):
+    """جلب صفحة مع إعادة المحاولة (مفيد عند الحظر المؤقت 429 أو انقطاع الشبكة)."""
+    last = None
+    for attempt in range(retries):
+        req = urllib.request.Request(url, data=data,
+                                     headers={"User-Agent": UA,
+                                              "Accept-Language": "en-US,en;q=0.9",
+                                              "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code == 404:
+                raise
+            time.sleep((10 if e.code == 429 else 3) * (attempt + 1))
+        except Exception as e:                              # timeout / شبكة
+            last = e
+            time.sleep(3 * (attempt + 1))
+    raise last
 
 
 def html_to_text(fragment):
@@ -118,6 +167,17 @@ def norm_host(h):
     return (h or "").strip().strip("[]").rstrip(".").lower()
 
 
+def is_bad_host(host):
+    """True إذا كان العنوان داخلي/وهمي ما يشتغل (127.0.0.1 ، 10.x ، 0.0.0.0 ، localhost ...)."""
+    if not SKIP_PRIVATE_HOSTS:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host in ("localhost", "example.com") or host.endswith((".local", ".localhost"))
+    return not ip.is_global
+
+
 # ----------------------------------------------------------- تحليل الكونفيج
 def parse_link(link):
     """
@@ -136,8 +196,10 @@ def parse_link(link):
             d = json.loads(b64decode_any(body.split("#")[0]))
         except Exception:
             return None
+        if not isinstance(d, dict):
+            return None
         host = norm_host(str(d.get("add", "")))
-        if not host:
+        if not host or not str(d.get("port", "")).strip() or not str(d.get("id", "")).strip():
             return None
         net = str(d.get("net", "")).lower()
         parts = [host, str(d.get("port", "")), str(d.get("id", "")).lower(), net,
@@ -184,6 +246,8 @@ def parse_link(link):
     if not host:
         return None
     user = urllib.parse.unquote(u.username or "")
+    if scheme in ("vless", "trojan") and not user:
+        return None                                   # بدون UUID/باسورد = غير صالح
     q = {k.lower(): v for k, v in urllib.parse.parse_qsl(u.query, keep_blank_values=True)}
     parts = [scheme, user, host, str(port or "")]
     for p in KEY_PARAMS:
@@ -209,6 +273,11 @@ def rename(link, new_name):
     return link.split("#", 1)[0] + "#" + urllib.parse.quote(new_name)
 
 
+def make_name(num, flag, tag):
+    """Sabah 151 🇩🇪 V2rei"""
+    return " ".join(x for x in (NAME_PREFIX, str(num), flag, tag) if x)
+
+
 # --------------------------------------------------------------- جلب القنوات
 def parse_page(page_html, channel):
     """يرجع [(رقم_الرسالة, [روابط...]), ...]"""
@@ -227,10 +296,18 @@ def parse_page(page_html, channel):
 def collect(source, seen):
     """يجمع أحدث الكونفيجات غير المكررة من قناة واحدة."""
     channel, limit = source["channel"], source["count"]
+    max_pages = source.get("max_pages", MAX_PAGES)
     result = []
     url = f"https://t.me/s/{channel}"
-    for _ in range(MAX_PAGES):
-        messages = parse_page(fetch(url), channel)
+    for page in range(max_pages):
+        try:
+            page_html = fetch(url)
+        except Exception as e:
+            if result:                       # عندنا شي -> نكتفي به بدل ما نخسر الكل
+                print(f"  @{channel}: توقف عند الصفحة {page + 1} ({e})")
+                break
+            raise
+        messages = parse_page(page_html, channel)
         if not messages:
             break
         # الأحدث أولاً، مع الحفاظ على ترتيب الكونفيجات داخل نفس الرسالة
@@ -239,7 +316,7 @@ def collect(source, seen):
                 if is_skipped(link):
                     continue
                 info = parse_link(link)
-                if not info or info["key"] in seen:
+                if not info or info["key"] in seen or is_bad_host(info["host"]):
                     continue
                 seen.add(info["key"])
                 info["link"] = link
@@ -250,6 +327,7 @@ def collect(source, seen):
         if oldest <= 1:
             break
         url = f"https://t.me/s/{channel}?before={oldest}"
+        time.sleep(PAGE_DELAY)
     return result
 
 
@@ -275,8 +353,10 @@ def geoip(hosts):
 
     unique_ips = sorted({ip for ip in ips.values() if ip})
     info = {}
-    for i in range(0, len(unique_ips), 100):           # ip-api يقبل 100 لكل طلب
+    for n, i in enumerate(range(0, len(unique_ips), 100)):   # ip-api يقبل 100 لكل طلب
         chunk = unique_ips[i:i + 100]
+        if n:
+            time.sleep(4.5)                            # حد ip-api: 15 طلب batch بالدقيقة
         try:
             res = json.loads(fetch(
                 "http://ip-api.com/batch?fields=status,countryCode,isp,org,as,query",
@@ -307,8 +387,8 @@ def choose_flag(cfg, geo, fallback):
 
 # -------------------------------------------------- الاحتفاظ بالقديم عند الفشل
 def load_previous():
-    """يرجع {رقم: رابط} من sub_raw.txt القديم."""
-    old = {}
+    """يرجع [(رقم, اختصار_القناة أو "", العلم, رابط), ...] من sub_raw.txt القديم."""
+    old = []
     try:
         with open("sub_raw.txt", encoding="utf-8") as f:
             lines = [l.strip() for l in f if l.strip()]
@@ -320,22 +400,52 @@ def load_previous():
         info = parse_link(line)
         if not info:
             continue
-        m = NUM_RE.match(info["name"].strip())
-        if m:
-            old[int(m.group(1))] = line
+        name = info["name"].strip()
+        m = NUM_RE.match(name)
+        if not m:
+            continue
+        words = name.split()
+        tag = words[-1] if words and words[-1] in TAGS else ""
+        old.append((int(m.group(1)), tag, get_flag(name), line))
     return old
 
 
+def kept_for_source(src, previous):
+    """الكونفيجات القديمة الخاصة بهذا المنبع (حسب الاختصار، أو حسب الأرقام القديمة)."""
+    kept = [(flag, link) for num, tag, flag, link in sorted(previous) if tag == src["tag"]]
+    if not kept and src.get("legacy_range"):
+        a, b = src["legacy_range"]
+        kept = [(flag, link) for num, tag, flag, link in sorted(previous)
+                if not tag and a <= num <= b]
+    out = []
+    for i, (flag, link) in enumerate(kept[:src["count"]]):
+        try:
+            out.append(rename(link, make_name(src["start"] + i,
+                                              flag or src["fallback_emoji"], src["tag"])))
+        except Exception:
+            continue
+    return out
+
+
 # ------------------------------------------------------------------ main
+def write_sub(path, lines):
+    raw = "\n".join(lines) + "\n" if lines else ""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(base64.b64encode(raw.encode("utf-8")).decode())
+    return raw
+
+
 def main():
     seen = set()
     per_source = []
     any_new = False
 
     for src in SOURCES:
+        t0 = time.time()
         try:
             cfgs = collect(src, seen)
-            print(f"@{src['channel']}: {len(cfgs)} كونفيج")
+            print(f"@{src['channel']}: {len(cfgs)}/{src['count']} كونفيج "
+                  f"({time.time() - t0:.0f}s)")
         except Exception as e:
             print(f"@{src['channel']}: خطأ أثناء الجلب -> {e}")
             cfgs = None
@@ -358,30 +468,41 @@ def main():
 
     previous = None
     final = []
+    by_tag = {}
     for src, cfgs in zip(SOURCES, per_source):
+        lines = []
         if not cfgs:
             # المنبع فشل/فاضي -> نحتفظ بكونفيجاته القديمة
             if previous is None:
                 previous = load_previous()
-            rng = range(src["start"], src["start"] + src["count"])
-            kept = [previous[n] for n in rng if n in previous]
-            print(f"@{src['channel']}: الاحتفاظ بـ {len(kept)} كونفيج قديم")
-            final.extend(kept)
-            continue
-        for i, cfg in enumerate(cfgs):
-            flag = choose_flag(cfg, geo, src["fallback_emoji"])
-            new_name = f"{NAME_PREFIX} {src['start'] + i} {flag}".strip()
-            final.append(rename(cfg["link"], new_name))
+            lines = kept_for_source(src, previous)
+            print(f"@{src['channel']}: الاحتفاظ بـ {len(lines)} كونفيج قديم")
+        else:
+            for i, cfg in enumerate(cfgs):
+                flag = choose_flag(cfg, geo, src["fallback_emoji"])
+                try:
+                    lines.append(rename(cfg["link"],
+                                        make_name(src["start"] + i, flag, src["tag"])))
+                except Exception:
+                    continue
+        by_tag[src["tag"]] = lines
+        final.extend(lines)
 
     raw = "\n".join(final) + "\n"
     with open("sub_raw.txt", "w", encoding="utf-8") as f:
         f.write(raw)
-    with open("sub.txt", "w", encoding="utf-8") as f:
-        f.write(base64.b64encode(raw.encode("utf-8")).decode())
+    write_sub("sub.txt", final)
+
+    if WRITE_PER_CHANNEL:
+        os.makedirs("subs", exist_ok=True)
+        for tag, lines in by_tag.items():
+            if lines:
+                write_sub(os.path.join("subs", f"{tag}.txt"), lines)
 
     print(f"تم: {len(final)} كونفيج")
-    for line in final[:3] + final[50:53]:
-        print("  ", urllib.parse.unquote(line)[-40:])
+    for tag, lines in by_tag.items():
+        if lines:
+            print(f"  [{tag}] {len(lines)} ->", urllib.parse.unquote(lines[0])[-30:])
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20      # 5 قنوات -> نحتاج وقت أكثر
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,6 +32,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add sub.txt sub_raw.txt
+          [ -d subs ] && git add subs/
           if git diff --staged --quiet; then
             echo "لا يوجد تغيير"
           else
