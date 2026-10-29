@@ -4,35 +4,29 @@
 ويبني ملف اشتراك (Subscription) لبرنامج v2rayNG.
 
 المنابع (قابلة للتعديل من قسم الإعدادات):
-  1) @TheFreeConfigs          -> آخر 50  -> Sabah 1   .. Sabah 50   (Free)
-  2) @tootffarangi2           -> آخر 100 -> Sabah 51  .. Sabah 150  (Toot)
-  3) @v2rei                   -> آخر 100 -> Sabah 151 .. Sabah 250  (V2rei)
-  4) @proxy_mtproto_vpns_free -> آخر 100 -> Sabah 251 .. Sabah 350  (Proxy)
-  5) @ettehad_vpn             -> آخر 100 -> Sabah 351 .. Sabah 450  (Etehad)
-  المجموع: 450 كونفيج
+  1) @TheFreeConfigs          -> آخر 50  -> Sabah 1 .. Sabah 50   (Free)
+  2) @tootffarangi2           -> آخر 100 -> Sabah 51 .. Sabah 150 (Toot)
+  3) @v2rei                   -> آخر 100 -> Sabah 151 .. Sabah 250 (V2rei)
+  4) @proxy_mtproto_vpns_free -> آخر 100 -> Sabah 251 .. Sabah 350 (Proxy)
+  5) @ettehad_vpn             -> آخر 100 -> Sabah 351 .. Sabah 450 (Etehad)
+المجموع: 450 كونفيج
 
 شكل الاسم:  Sabah 151 🇩🇪 V2rei   (رقم + علم الدولة + اختصار القناة)
-
 - سيرفرات الشادوساكس (ss:// و ssr://) يتم تخطيها ولا تدخل في العدد.
 
-المميزات:
-- حذف المكرر "الذكي": نفس السيرفر حتى لو اختلف ترتيب الباراميترات أو الاسم أو
-  باراميترات شكلية (fp / sid / spx / host الإعلاني ...) يعتبر مكرر.
-  والحذف يكون عبر كل المنابع (كونفيج موجود في المنبع 1 لا يتكرر في المنبع 2).
-- علم الدولة: يحاول معرفة دولة السيرفر عن طريق IP (GeoIP) ويضع علمها.
-  إذا ما قدر (CDN مثل Cloudflare أو فشل البحث) يستخدم العلم الأصلي من اسم
-  الكونفيج، وإذا ما فيه علم يستخدم إيموجي بديل خاص بالقناة.
-- اختصار اسم القناة في آخر اسم الكونفيج حتى تعرف هو من أي قناة.
-- تخطي السيرفرات ذات العناوين الداخلية/الوهمية (127.0.0.1 ، 10.x ، 0.0.0.0 ...).
-- إعادة المحاولة تلقائياً عند فشل الاتصال بتيليجرام (أو حظر مؤقت 429).
-- إذا فشل أحد المنابع، يحتفظ بكونفيجاته القديمة (حسب اختصار القناة) بدل ما يمسحها.
-- يكتب:
-    sub.txt            (Base64 - رابط الاشتراك الكامل)
-    sub_raw.txt        (نص عادي)
-    subs/<Tag>.txt     (اشتراك منفصل لكل قناة - Base64)
+الجديد في هذه النسخة:
+- حذف مكرر أقوى: نفس السيرفر (نفس الـ UUID/الباسورد + نفس العنوان + نفس البورت)
+  يعتبر مكرر حتى لو اختلفت كل الباراميترات الباقية (sni / path / fp / type ...)
+  وعبر كل المنابع. وكذلك الكونفيجات القديمة المحتفظ بها لا تتكرر.
+- خيار DEDUPE_CDN_VARIANTS لحذف نسخ نفس الكونفيج التي تختلف فقط في IP الكلاود فلير.
+- قراءة الروابط من داخل href (الروابط المخفية خلف نص مثل "اضغط هنا").
+- لا يعتمد على اسم القناة داخل الصفحة (إذا تغير اسم القناة يظل يشتغل).
+- تجربة t.me ثم telegram.me إذا فشل الأول.
+- سطر تشخيص لكل قناة في اللوج يوضح كم رسالة وكم رابط وكم مكرر ... إلخ.
 
 لا يحتاج أي مكتبات خارجية.
 """
+
 import base64
 import html
 import ipaddress
@@ -48,8 +42,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 # ===================== الإعدادات =====================
-NAME_PREFIX = "Sabah"        # الاسم الجديد
-MAX_PAGES = 60               # أقصى عدد صفحات يرجع لها في تاريخ كل قناة (افتراضي)
+NAME_PREFIX = "Sabah"          # الاسم الجديد
+MAX_PAGES = 60                 # أقصى عدد صفحات يرجع لها في تاريخ كل قناة (افتراضي)
 
 # كل منبع:
 #   channel        : اسم القناة (بدون @)
@@ -74,24 +68,36 @@ SOURCES = [
 ]
 
 # بروتوكولات يتم تخطيها تماماً (لا تدخل في الاشتراك ولا في العدد)
-# ss = Shadowsocks  ،  ssr = ShadowsocksR
+# ss = Shadowsocks ، ssr = ShadowsocksR
 SKIP_PROTOCOLS = {"ss", "ssr"}
 
-USE_GEOIP = True             # True = حط علم دولة السيرفر الحقيقية (حسب الـ IP)
+USE_GEOIP = True               # True = حط علم دولة السيرفر الحقيقية (حسب الـ IP)
+
 # إذا الـ GeoIP قال إن السيرفر في هذه الدول وكان للكونفيج علم أصلي مختلف،
 # نخلي العلم الأصلي (لأن هذه غالباً سيرفرات "تونل/ريلاي" والخروج الحقيقي برا)
 RELAY_COUNTRIES = {"IR"}
 
-SKIP_PRIVATE_HOSTS = True    # True = تخطي السيرفرات بعناوين داخلية/وهمية (127.0.0.1 ...)
-WRITE_PER_CHANNEL = True     # True = اكتب اشتراك منفصل لكل قناة في مجلد subs/
-PAGE_DELAY = 0.4             # ثواني بين كل صفحة وصفحة (حتى ما يحظرنا تيليجرام)
+SKIP_PRIVATE_HOSTS = True      # True = تخطي السيرفرات بعناوين داخلية/وهمية (127.0.0.1 ...)
+WRITE_PER_CHANNEL = True       # True = اكتب اشتراك منفصل لكل قناة في مجلد subs/
+PAGE_DELAY = 0.4               # ثواني بين كل صفحة وصفحة (حتى ما يحظرنا تيليجرام)
+
+# False (الافتراضي) = المكرر هو نفس (UUID + العنوان + البورت).
+# True = أيضاً نعتبر مكرر الكونفيجات اللي تختلف فقط في عنوان الدخول (مثل IPات كلاود فلير
+#        المختلفة لنفس الدومين/المسار). هذا يقلل العدد كثير لكنه يحذف تنويعات الـ IP.
+DEDUPE_CDN_VARIANTS = False
+
+# مواقع المعاينة العامة لتيليجرام (يجرب بالترتيب لين يلقى واحد يرجع رسائل)
+MIRRORS = ("t.me", "telegram.me")
 # =====================================================
 
 PROTOCOLS = ["hysteria2", "hysteria", "wireguard", "vless", "vmess",
              "trojan", "tuic", "ssr", "hy2", "ss"]
+
 # (?<![A-Za-z0-9]) حتى لا يلتقط "ss://" من داخل "vless://"
 LINK_RE = re.compile(r'(?<![A-Za-z0-9])(?:%s)://[^\s<>"\'`]+' % "|".join(PROTOCOLS),
                      re.IGNORECASE)
+HREF_RE = re.compile(r'href="([^"]+)"', re.IGNORECASE)
+MT_RE = re.compile(r'(?:tg://proxy|t\.me/proxy|tg://socks|t\.me/socks)\?', re.IGNORECASE)
 FLAG_RE = re.compile("[\U0001F1E6-\U0001F1FF]{2}")
 NUM_RE = re.compile(r"^%s\s+(\d+)\b" % re.escape(NAME_PREFIX))
 TAGS = {s["tag"] for s in SOURCES}
@@ -99,10 +105,10 @@ TAGS = {s["tag"] for s in SOURCES}
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
-# باراميترات تؤثر على "هوية" السيرفر (الباقي شكلي ولا يدخل في كشف التكرار)
-KEY_PARAMS = ("type", "security", "sni", "pbk", "path", "servicename")
 # الـ host يدخل في المقارنة فقط مع هذه الأنواع (في tcp عادة يكون نص إعلاني)
 HOST_MATTERS = {"ws", "xhttp", "httpupgrade", "h2", "http", "splithttp"}
+# أنواع النقل اللي تمر عادة عبر CDN (تستخدم في DEDUPE_CDN_VARIANTS)
+CDN_TRANSPORTS = {"ws", "xhttp", "httpupgrade", "splithttp", "h2"}
 
 CDN_WORDS = ("cloudflare", "fastly", "akamai", "cloudfront", "gcore", "g-core",
              "cdn77", "bunny", "edgecast", "stackpath", "arvancloud", "imperva",
@@ -126,7 +132,7 @@ def fetch(url, data=None, timeout=30, retries=3):
             if e.code == 404:
                 raise
             time.sleep((10 if e.code == 429 else 3) * (attempt + 1))
-        except Exception as e:                              # timeout / شبكة
+        except Exception as e:  # timeout / شبكة
             last = e
             time.sleep(3 * (attempt + 1))
     raise last
@@ -167,6 +173,25 @@ def norm_host(h):
     return (h or "").strip().strip("[]").rstrip(".").lower()
 
 
+def txt(x):
+    """تحويل أي قيمة لنص (None -> فاضي)."""
+    return "" if x is None else str(x).strip()
+
+
+def is_ip(h):
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        return False
+
+
+def norm_path(p):
+    """يشيل الجزء الإعلاني بعد ? ويوحد الشرطة الأخيرة."""
+    p = urllib.parse.unquote(p or "").split("?")[0].split("#")[0].strip()
+    return p.rstrip("/") or "/"
+
+
 def is_bad_host(host):
     """True إذا كان العنوان داخلي/وهمي ما يشتغل (127.0.0.1 ، 10.x ، 0.0.0.0 ، localhost ...)."""
     if not SKIP_PRIVATE_HOSTS:
@@ -182,13 +207,15 @@ def is_bad_host(host):
 def parse_link(link):
     """
     يرجع dict فيه:
-      key   : مفتاح لكشف التكرار
-      host  : عنوان السيرفر
-      name  : الاسم الأصلي
+      key  : مفتاح كشف التكرار الأساسي (نوع + UUID + عنوان + بورت)
+      key2 : مفتاح أوسع (يدمج تنويعات IP الكلاود فلير) - يستخدم إذا DEDUPE_CDN_VARIANTS
+      host : عنوان السيرفر
+      name : الاسم الأصلي
     أو None إذا الرابط غير صالح.
     """
     scheme = link.split("://", 1)[0].lower()
     body = link.split("://", 1)[1]
+    fam = "hysteria2" if scheme == "hy2" else scheme
 
     # ---------- vmess (Base64 JSON)
     if scheme == "vmess":
@@ -198,17 +225,19 @@ def parse_link(link):
             return None
         if not isinstance(d, dict):
             return None
-        host = norm_host(str(d.get("add", "")))
-        if not host or not str(d.get("port", "")).strip() or not str(d.get("id", "")).strip():
+        host = norm_host(txt(d.get("add")))
+        port = txt(d.get("port"))
+        uid = txt(d.get("id")).lower()
+        if not host or not port or not uid:
             return None
-        net = str(d.get("net", "")).lower()
-        parts = [host, str(d.get("port", "")), str(d.get("id", "")).lower(), net,
-                 str(d.get("tls", "")).lower(), norm_host(str(d.get("sni", ""))),
-                 str(d.get("path", ""))]
-        if net in HOST_MATTERS:
-            parts.append(norm_host(str(d.get("host", ""))))
-        return {"key": "vmess|" + "|".join(parts), "host": host,
-                "name": str(d.get("ps", ""))}
+        net = txt(d.get("net")).lower() or "tcp"
+        tls = txt(d.get("tls")).lower()
+        dom = norm_host(txt(d.get("sni"))) or norm_host(txt(d.get("host")))
+        key = f"vmess|{uid}|{host}|{port}"
+        key2 = key
+        if tls == "tls" and net in CDN_TRANSPORTS and dom and not is_ip(dom):
+            key2 = f"cdn|vmess|{uid}|{port}|{dom}|{net}|{norm_path(txt(d.get('path')))}"
+        return {"key": key, "key2": key2, "host": host, "name": txt(d.get("ps"))}
 
     base, _, frag = link.partition("#")
     name = urllib.parse.unquote(frag)
@@ -216,14 +245,14 @@ def parse_link(link):
     # ---------- shadowsocks
     if scheme == "ss":
         rest = base.split("://", 1)[1].split("?")[0].split("/")[0]
-        if "@" not in rest:                       # ss://BASE64(method:pass@host:port)
+        if "@" not in rest:  # ss://BASE64(method:pass@host:port)
             try:
                 rest = b64decode_any(urllib.parse.unquote(rest))
             except Exception:
                 return None
         userinfo, _, hostport = rest.rpartition("@")
         userinfo = urllib.parse.unquote(userinfo)
-        if ":" not in userinfo:                   # userinfo بصيغة Base64
+        if ":" not in userinfo:  # userinfo بصيغة Base64
             try:
                 userinfo = b64decode_any(userinfo)
             except Exception:
@@ -235,9 +264,10 @@ def parse_link(link):
             return None
         if not host or not port:
             return None
-        return {"key": f"ss|{userinfo}|{host}|{port}", "host": host, "name": name}
+        key = f"ss|{userinfo}|{host}|{port}"
+        return {"key": key, "key2": key, "host": host, "name": name}
 
-    # ---------- vless / trojan / hysteria / tuic / ... (صيغة URL عادية)
+    # ---------- vless / trojan / hysteria / tuic / wireguard (صيغة URL عادية)
     try:
         u = urllib.parse.urlsplit(base)
         host, port = norm_host(u.hostname), u.port
@@ -247,15 +277,24 @@ def parse_link(link):
         return None
     user = urllib.parse.unquote(u.username or "")
     if scheme in ("vless", "trojan") and not user:
-        return None                                   # بدون UUID/باسورد = غير صالح
+        return None  # بدون UUID/باسورد = غير صالح
+    # UUID ما يتأثر بحالة الحروف، أما باسورد التروجان فيتأثر
+    user_n = user.lower() if scheme in ("vless", "tuic") else user
+
     q = {k.lower(): v for k, v in urllib.parse.parse_qsl(u.query, keep_blank_values=True)}
-    parts = [scheme, user, host, str(port or "")]
-    for p in KEY_PARAMS:
-        val = q.get(p, "")
-        parts.append(norm_host(val) if p == "sni" else val)
-    if q.get("type", "tcp").lower() in HOST_MATTERS or q.get("headertype") == "http":
-        parts.append(norm_host(q.get("host", "")))
-    return {"key": "|".join(parts), "host": host, "name": name}
+    transport = (q.get("type") or "tcp").lower()
+    sec = (q.get("security") or "").lower()
+    dom = norm_host(q.get("sni", "")) or norm_host(q.get("host", ""))
+
+    key = f"{fam}|{user_n}|{host}|{port or ''}"
+    key2 = key
+    if sec == "tls" and transport in CDN_TRANSPORTS and dom and not is_ip(dom):
+        key2 = f"cdn|{fam}|{user_n}|{port or ''}|{dom}|{transport}|{norm_path(q.get('path', ''))}"
+    return {"key": key, "key2": key2, "host": host, "name": name}
+
+
+def dedupe_key(info):
+    return info["key2"] if DEDUPE_CDN_VARIANTS else info["key"]
 
 
 def is_skipped(link):
@@ -280,54 +319,129 @@ def make_name(num, flag, tag):
 
 # --------------------------------------------------------------- جلب القنوات
 def parse_page(page_html, channel):
-    """يرجع [(رقم_الرسالة, [روابط...]), ...]"""
-    post_re = re.compile(r'data-post="%s/(\d+)"' % re.escape(channel), re.IGNORECASE)
-    messages = []
+    """
+    يرجع ([(رقم_الرسالة, [روابط...], عدد_روابط_MTProto), ...], اسم_القناة_الفعلي)
+    ملاحظة: ما نعتمد على اسم القناة داخل الصفحة (ممكن يتغير أو يختلف في الحروف).
+    """
+    post_re = re.compile(r'data-post="([^"/]+)/(\d+)"', re.IGNORECASE)
     matches = list(post_re.finditer(page_html))
+    messages, real = [], ""
     for i, m in enumerate(matches):
+        if not real:
+            real = m.group(1)
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(page_html)
-        text = html_to_text(page_html[start:end])
-        links = [l.rstrip(".,;)]}") for l in LINK_RE.findall(text)]
-        messages.append((int(m.group(1)), links))
-    return messages
+        block = page_html[start:end]
+
+        # 1) الروابط الظاهرة كنص
+        links = [l.rstrip(".,;)]}") for l in LINK_RE.findall(html_to_text(block))]
+        # 2) الروابط المخفية داخل href (مثل: <a href="vless://...">اضغط هنا</a>)
+        for href in HREF_RE.findall(block):
+            href = html.unescape(href).strip()
+            if LINK_RE.match(href):
+                links.append(href.rstrip(".,;)]}"))
+        links = list(dict.fromkeys(links))  # حذف التكرار داخل نفس الرسالة
+
+        n_mt = len(MT_RE.findall(html.unescape(block)))
+        messages.append((int(m.group(2)), links, n_mt))
+    return messages, real
+
+
+def report(channel, st, got, limit):
+    """سطر تشخيص في اللوج."""
+    print(f"  [{channel}] صفحات={st['pages']} رسائل={st['msgs']} روابط={st['raw']} | "
+          f"مكرر={st['dup']} ss={st['ss']} غير_صالح={st['bad']} داخلي={st['private']} | "
+          f"MTProto={st['mtproto']} | مقبول={got}/{limit}")
+    if got == 0:
+        if st["raw"] == 0:
+            msg = "لم يتم العثور على أي رابط v2ray في الرسائل"
+            if st["mtproto"]:
+                msg += " (القناة تنشر بروكسيات تيليجرام MTProto فقط وهذه لا تعمل في v2rayNG)"
+            print(f"  [{channel}] تشخيص: {msg}")
+        elif st["dup"] == st["raw"] - st["ss"] - st["bad"] - st["private"]:
+            print(f"  [{channel}] تشخيص: كل الروابط مكررة من منابع سابقة")
 
 
 def collect(source, seen):
     """يجمع أحدث الكونفيجات غير المكررة من قناة واحدة."""
     channel, limit = source["channel"], source["count"]
     max_pages = source.get("max_pages", MAX_PAGES)
+    st = {"pages": 0, "msgs": 0, "raw": 0, "ss": 0, "bad": 0,
+          "private": 0, "dup": 0, "mtproto": 0}
     result = []
-    url = f"https://t.me/s/{channel}"
-    for page in range(max_pages):
+
+    # الصفحة الأولى: نجرب المواقع بالترتيب لين يرجع واحد منها رسائل
+    first_html, base, errors = None, None, []
+    for host in MIRRORS:
+        url0 = f"https://{host}/s/{channel}"
         try:
-            page_html = fetch(url)
+            page_html = fetch(url0)
         except Exception as e:
-            if result:                       # عندنا شي -> نكتفي به بدل ما نخسر الكل
-                print(f"  @{channel}: توقف عند الصفحة {page + 1} ({e})")
+            errors.append(f"{host}: فشل الاتصال ({e})")
+            continue
+        msgs, real = parse_page(page_html, channel)
+        if msgs:
+            first_html, base = page_html, url0
+            if real and real.lower() != channel.lower():
+                print(f"  تنبيه: القناة @{channel} اسمها الحالي @{real} - حدّث SOURCES")
+            break
+        errors.append(f"{host}: الصفحة بدون رسائل (المعاينة معطلة أو القناة محذوفة/خاصة)")
+    if base is None:
+        for e in errors:
+            print(f"  [{channel}] {e}")
+        return result
+
+    url, page_html, full = base, first_html, False
+    for page in range(max_pages):
+        if page:
+            try:
+                page_html = fetch(url)
+            except Exception as e:
+                print(f"  [{channel}] توقف عند الصفحة {page + 1} ({e})")
                 break
-            raise
-        messages = parse_page(page_html, channel)
+        st["pages"] += 1
+        messages, _real = parse_page(page_html, channel)
         if not messages:
             break
+
         # الأحدث أولاً، مع الحفاظ على ترتيب الكونفيجات داخل نفس الرسالة
-        for _msg_id, links in sorted(messages, key=lambda x: -x[0]):
+        for _msg_id, links, n_mt in sorted(messages, key=lambda x: -x[0]):
+            st["msgs"] += 1
+            st["mtproto"] += n_mt
             for link in links:
+                st["raw"] += 1
                 if is_skipped(link):
+                    st["ss"] += 1
                     continue
                 info = parse_link(link)
-                if not info or info["key"] in seen or is_bad_host(info["host"]):
+                if not info:
+                    st["bad"] += 1
                     continue
-                seen.add(info["key"])
+                if is_bad_host(info["host"]):
+                    st["private"] += 1
+                    continue
+                k = dedupe_key(info)
+                if k in seen:
+                    st["dup"] += 1
+                    continue
+                seen.add(k)
                 info["link"] = link
                 result.append(info)
                 if len(result) >= limit:
-                    return result
+                    full = True
+                    break
+            if full:
+                break
+        if full:
+            break
+
         oldest = min(m[0] for m in messages)
         if oldest <= 1:
             break
-        url = f"https://t.me/s/{channel}?before={oldest}"
+        url = f"{base}?before={oldest}"
         time.sleep(PAGE_DELAY)
+
+    report(channel, st, len(result), limit)
     return result
 
 
@@ -335,7 +449,7 @@ def collect(source, seen):
 def resolve(host):
     try:
         socket.inet_pton(socket.AF_INET6 if ":" in host else socket.AF_INET, host)
-        return host                                   # هو IP أصلاً
+        return host  # هو IP أصلاً
     except OSError:
         pass
     try:
@@ -350,13 +464,13 @@ def geoip(hosts):
     hosts = sorted(set(hosts))
     with ThreadPoolExecutor(max_workers=32) as ex:
         ips = dict(zip(hosts, ex.map(resolve, hosts)))
-
     unique_ips = sorted({ip for ip in ips.values() if ip})
+
     info = {}
-    for n, i in enumerate(range(0, len(unique_ips), 100)):   # ip-api يقبل 100 لكل طلب
+    for n, i in enumerate(range(0, len(unique_ips), 100)):  # ip-api يقبل 100 لكل طلب
         chunk = unique_ips[i:i + 100]
         if n:
-            time.sleep(4.5)                            # حد ip-api: 15 طلب batch بالدقيقة
+            time.sleep(4.5)  # حد ip-api: 15 طلب batch بالدقيقة
         try:
             res = json.loads(fetch(
                 "http://ip-api.com/batch?fields=status,countryCode,isp,org,as,query",
@@ -370,14 +484,13 @@ def geoip(hosts):
             blob = " ".join(str(r.get(k, "")) for k in ("isp", "org", "as")).lower()
             info[r["query"]] = (r.get("countryCode", ""),
                                 any(w in blob for w in CDN_WORDS))
-
     return {h: info.get(ip) for h, ip in ips.items() if ip and ip in info}
 
 
 def choose_flag(cfg, geo, fallback):
     original = get_flag(cfg["name"])
     g = geo.get(cfg["host"])
-    if g and g[0] and not g[1]:                        # موجود وليس CDN
+    if g and g[0] and not g[1]:  # موجود وليس CDN
         cc = g[0].upper()
         if cc in RELAY_COUNTRIES and original and flag_to_cc(original) != cc:
             return original
@@ -410,20 +523,33 @@ def load_previous():
     return old
 
 
-def kept_for_source(src, previous):
-    """الكونفيجات القديمة الخاصة بهذا المنبع (حسب الاختصار، أو حسب الأرقام القديمة)."""
+def kept_for_source(src, previous, seen):
+    """
+    الكونفيجات القديمة الخاصة بهذا المنبع (حسب الاختصار، أو حسب الأرقام القديمة).
+    تتجنب أي كونفيج مكرر مع اللي انجلب من المنابع الثانية (seen).
+    """
     kept = [(flag, link) for num, tag, flag, link in sorted(previous) if tag == src["tag"]]
     if not kept and src.get("legacy_range"):
         a, b = src["legacy_range"]
         kept = [(flag, link) for num, tag, flag, link in sorted(previous)
                 if not tag and a <= num <= b]
+
     out = []
-    for i, (flag, link) in enumerate(kept[:src["count"]]):
+    for flag, link in kept:
+        if len(out) >= src["count"]:
+            break
+        info = parse_link(link)
+        if not info:
+            continue
+        k = dedupe_key(info)
+        if k in seen:
+            continue
         try:
-            out.append(rename(link, make_name(src["start"] + i,
+            out.append(rename(link, make_name(src["start"] + len(out),
                                               flag or src["fallback_emoji"], src["tag"])))
         except Exception:
             continue
+        seen.add(k)
     return out
 
 
@@ -472,10 +598,10 @@ def main():
     for src, cfgs in zip(SOURCES, per_source):
         lines = []
         if not cfgs:
-            # المنبع فشل/فاضي -> نحتفظ بكونفيجاته القديمة
+            # المنبع فشل/فاضي -> نحتفظ بكونفيجاته القديمة (بدون المكرر)
             if previous is None:
                 previous = load_previous()
-            lines = kept_for_source(src, previous)
+            lines = kept_for_source(src, previous, seen)
             print(f"@{src['channel']}: الاحتفاظ بـ {len(lines)} كونفيج قديم")
         else:
             for i, cfg in enumerate(cfgs):
