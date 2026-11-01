@@ -17,8 +17,6 @@ Sabah Public Sub - يجلب الكونفيجات من قنوات تيليجرا�
   3) الترقيم حسب الأحدث: آخر كونفيج انحط في أي قناة = Sabah 1 ، اللي قبله = Sabah 2 ...
      (مو شرط ترتيب القنوات ورا بعض).
   4) العلم = دولة الخروج الحقيقية (من الاختبار نفسه) بدل تخمين GeoIP لعنوان الدخول.
-  5) فحص من داخل إيران: يتأكد إن السيرفر مو محجوب في إيران (نقاط check-host.net
-     في طهران وأصفهان وشيراز). المحجوب ما يدخل الاشتراك.
 
 شكل الاسم:  Sabah 1 🇩🇪 V2rei   (رقم + علم دولة الخروج + اختصار القناة)
 لا يحتاج مكتبات بايثون خارجية. يحتاج ملف xray (يتم تنزيله في GitHub Actions) و curl.
@@ -103,14 +101,6 @@ EXIT_INFO_URLS = ("https://www.cloudflare.com/cdn-cgi/trace", "https://ipinfo.io
 # Xray من نسخة 26.7.11 يرفضها نهائياً (والبرامج المحدثة كذلك) + ما فيها تشفير.
 # True = نتخطاها بدون اختبار. لو تبيها: خلها False وثبّت XRAY_VERSION على v26.6.27 في update.yml
 SKIP_UNENCRYPTED = True
-
-# ---------- اختبار الوصول من داخل إيران (مجاني عن طريق نقاط check-host.net في إيران)
-# يتأكد إن IP:البورت حق السيرفر مو محجوب في إيران (طهران، أصفهان، شيراز ...)
-IRAN_CHECK = True
-IRAN_MIN_RATIO = 0.5           # لازم يوصل له من نص نقاط إيران على الأقل
-IRAN_FALLBACK_NODES = ("ir1", "ir2", "ir3", "ir5", "ir7")  # تُستخدم لو ما قدر يجيب القائمة
-IRAN_CACHE_FILE = "iran_cache.json"  # يحفظ النتائج حتى ما نعيد فحص نفس السيرفر كل مرة
-IRAN_CACHE_HOURS = 3
 # =====================================================
 
 PROTOCOLS = ["hysteria2", "hysteria", "wireguard", "vless", "vmess",
@@ -694,101 +684,6 @@ def test_all(cands):
         list(ex.map(run, cands))
 
 
-# ------------------------------------------------------- اختبار من داخل إيران
-CH = "https://check-host.net"
-
-
-def ch_get(url):
-    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return json.load(r)
-
-
-def iran_nodes():
-    try:
-        d = ch_get(f"{CH}/nodes/hosts")["nodes"]
-        nodes = sorted(k for k, v in d.items() if (v.get("location") or [""])[0].lower() == "ir")
-        if nodes:
-            return nodes
-    except Exception as e:
-        print("  تحذير: ما قدرت أجيب قائمة نقاط إيران:", e)
-    return [f"{n}.node.check-host.net" for n in IRAN_FALLBACK_NODES]
-
-
-def iran_target(c):
-    h = c["host"]
-    return f"[{h}]:{c['port']}" if ":" in h else f"{h}:{c['port']}"
-
-
-def iran_check(cfgs):
-    """يفحص (TCP) كل سيرفر من نقاط داخل إيران. يحط c['iran'] = {"ok", "n", "ms"} أو None."""
-    now = time.time()
-    try:
-        with open(IRAN_CACHE_FILE, encoding="utf-8") as f:
-            cache = json.load(f)
-    except Exception:
-        cache = {}
-    cache = {k: v for k, v in cache.items() if now - v.get("t", 0) < 48 * 3600}
-    fresh = lambda t: t in cache and now - cache[t]["t"] < IRAN_CACHE_HOURS * 3600
-    todo = sorted({iran_target(c) for c in cfgs if not fresh(iran_target(c))})
-
-    if todo:
-        nodes = iran_nodes()
-        q = "&".join("node=" + n for n in nodes)
-        print(f"  فحص إيران: {len(todo)} سيرفر من {len(nodes)} نقطة "
-              f"({len(cfgs) - len(todo)} من الكاش)")
-        def submit(t):
-            time.sleep(0.2)
-            try:
-                return t, ch_get(f"{CH}/check-tcp?host={urllib.parse.quote(t, safe=':[]')}&{q}").get("request_id")
-            except Exception:
-                return t, None
-
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            submitted = {t: rid for t, rid in ex.map(submit, todo) if rid}
-        time.sleep(10)
-
-        def result(item):
-            t, rid = item
-            d = None
-            for _ in range(3):
-                try:
-                    d = ch_get(f"{CH}/check-result/{rid}")
-                except Exception:
-                    d = None
-                if d and all(v is not None for v in d.values()):
-                    break
-                time.sleep(4)
-            if not d:
-                return t, None
-            times = [v[0]["time"] for v in d.values()
-                     if isinstance(v, list) and v and isinstance(v[0], dict) and "time" in v[0]]
-            n = sum(1 for v in d.values() if v is not None)
-            if not n:
-                return t, None
-            return t, {"t": now, "ok": len(times), "n": n,
-                       "ms": int(sum(times) / len(times) * 1000) if times else 0}
-
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            for t, r in ex.map(result, submitted.items()):
-                if r:
-                    cache[t] = r
-        try:
-            with open(IRAN_CACHE_FILE, "w", encoding="utf-8") as f:
-                json.dump(cache, f, separators=(",", ":"))
-        except OSError:
-            pass
-    for c in cfgs:
-        c["iran"] = cache.get(iran_target(c))
-
-
-def iran_ok(c):
-    r = c.get("iran")
-    if not r:  # ما قدرنا نفحص (الخدمة واقفة) -> ما نحذفه
-        return True
-    return r["ok"] >= 1 and r["ok"] / r["n"] >= IRAN_MIN_RATIO
-
-
 # ------------------------------------------------------------------ main
 def write_sub(path, lines):
     raw = "\n".join(lines) + "\n" if lines else ""
@@ -861,18 +756,6 @@ def main():
         print(f"حذف مكرر IP الخروج: {len(passed) - len(keep)}")
         passed = keep
 
-    # 4.5) الوصول من داخل إيران
-    if IRAN_CHECK and passed:
-        try:
-            iran_check(passed)
-            blocked = [c for c in passed if not iran_ok(c)]
-            unknown = sum(1 for c in passed if not c.get("iran"))
-            print(f"فحص إيران: محجوب={len(blocked)} غير_معروف={unknown} "
-                  f"يوصل={len(passed) - len(blocked) - unknown}")
-            passed = [c for c in passed if iran_ok(c)]
-        except Exception as e:
-            print("تحذير: فحص إيران فشل، تم تخطيه:", e)
-
     # 5) الترتيب: الأحدث = رقم 1 ، مع حد لكل قناة
     passed.sort(key=sort_key)
     per_src, final_cfgs = {}, []
@@ -899,10 +782,8 @@ def main():
             continue
         final.append(line)
         by_tag[src["tag"]].append(line)
-        ir = c.get("iran")
         rows.append((num, flag, src["tag"], c["scheme"], c["net"], c["sec"] or "none",
                      c["test"]["delay"], c["test"]["speed"],
-                     f"{ir['ok']}/{ir['n']} ({ir['ms']}ms)" if ir else "-",
                      datetime.fromtimestamp(c["date"], timezone.utc).strftime("%m-%d %H:%M") if c["date"] else "-"))
 
     with open("sub_raw.txt", "w", encoding="utf-8") as f:
@@ -923,8 +804,8 @@ def main():
     if summary:
         with open(summary, "a", encoding="utf-8") as f:
             f.write(f"## Sabah Sub: {len(final)} working configs\n\n")
-            f.write("| # | Flag | Channel | Proto | Net | Sec | Delay ms | Mbps | Iran nodes | Posted (UTC) |\n")
-            f.write("|---|---|---|---|---|---|---|---|---|---|\n")
+            f.write("| # | Flag | Channel | Proto | Net | Sec | Delay ms | Mbps | Posted (UTC) |\n")
+            f.write("|---|---|---|---|---|---|---|---|---|\n")
             for r in rows:
                 f.write("| " + " | ".join(str(x) for x in r) + " |\n")
 
