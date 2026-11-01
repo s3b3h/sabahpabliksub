@@ -2,7 +2,7 @@ name: Update V2Ray Subscription
 
 on:
   schedule:
-    - cron: "7,37 * * * *"   # كل 30 دقيقة (بدقائق أقل زحمة)
+    - cron: "7,37 * * * *"   # كل 30 دقيقة
   workflow_dispatch:         # تشغيل يدوي من تبويب Actions
   push:                      # تشغيل مباشر بعد أي تعديل على السكربت أو هذا الملف
     paths:
@@ -14,18 +14,36 @@ permissions:
 
 concurrency:
   group: update-sub
-  cancel-in-progress: true   # لو فيه تشغيل قديم عالق، يلغيه ويبدأ الجديد
+  cancel-in-progress: true
+
+env:
+  # نسخة Xray المستخدمة في الاختبار. "latest" = أحدث نسخة
+  # (لو تبي تقبل كونفيجات security=none حطها v26.6.27 وخلي SKIP_UNENCRYPTED = False في scrape.py)
+  XRAY_VERSION: latest
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 20      # 5 قنوات -> نحتاج وقت أكثر
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch configs
-        run: python3 scrape.py
+      - name: Install Xray-core (لاختبار الكونفيجات)
+        run: |
+          if [ "$XRAY_VERSION" = "latest" ]; then
+            URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+          else
+            URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
+          fi
+          mkdir -p xray-bin
+          curl -fsSL --retry 3 -o /tmp/xray.zip "$URL"
+          unzip -oq /tmp/xray.zip xray -d xray-bin
+          chmod +x xray-bin/xray
+          xray-bin/xray version | head -1
+
+      - name: Fetch & test configs
+        run: python3 -u scrape.py
 
       - name: Commit & push if changed
         run: |
