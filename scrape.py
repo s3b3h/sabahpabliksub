@@ -3,36 +3,21 @@
 يجلب أحدث الكونفيجات من عدة قنوات تيليجرام عامة (عن طريق صفحة المعاينة t.me/s/...)
 ويبني ملف اشتراك (Subscription) لبرنامج v2rayNG.
 
-المنابع (قابلة للتعديل من قسم الإعدادات):
-  1) @TheFreeConfigs          -> آخر 50  -> Sabah 1   .. Sabah 50   (Free)
-  2) @tootffarangi2           -> آخر 100 -> Sabah 51  .. Sabah 150  (Toot)
-  3) @v2rei                   -> آخر 100 -> Sabah 151 .. Sabah 250  (V2rei)
-  4) @proxy_mtproto_vpns_free -> آخر 100 -> Sabah 251 .. Sabah 350  (Proxy)
-  5) @ettehad_vpn             -> آخر 100 -> Sabah 351 .. Sabah 450  (Etehad)
-  المجموع: 450 كونفيج
+- من كل قناة: آخر 50 كونفيج (بدون أي فلتر فحص اتصال/إنترنت).
+- حذف المكرر: إذا تطابق (UUID/الباسورد + عنوان السيرفر IP + البورت) يُحذف الكونفيج،
+  ويُجلب بدله كونفيج أقدم من نفس القناة حتى يكتمل العدد 50. ويشمل الحذف كل القنوات.
+- سيرفرات الشادوساكس (ss:// و ssr://) يتم تخطيها.
+- علم الدولة عن طريق GeoIP، واختصار القناة في آخر الاسم.
+- إذا فشلت قناة، يحتفظ بكونفيجاتها القديمة.
 
-شكل الاسم:  Sabah 151 🇩🇪 V2rei   (رقم + علم الدولة + اختصار القناة)
-
-- سيرفرات الشادوساكس (ss:// و ssr://) يتم تخطيها ولا تدخل في العدد.
-
-المميزات:
-- حذف المكرر "الذكي": نفس السيرفر حتى لو اختلف ترتيب الباراميترات أو الاسم أو
-  باراميترات شكلية (fp / sid / spx / host الإعلاني ...) يعتبر مكرر.
-  والحذف يكون عبر كل المنابع (كونفيج موجود في المنبع 1 لا يتكرر في المنبع 2).
-- علم الدولة: يحاول معرفة دولة السيرفر عن طريق IP (GeoIP) ويضع علمها.
-  إذا ما قدر (CDN مثل Cloudflare أو فشل البحث) يستخدم العلم الأصلي من اسم
-  الكونفيج، وإذا ما فيه علم يستخدم إيموجي بديل خاص بالقناة.
-- اختصار اسم القناة في آخر اسم الكونفيج حتى تعرف هو من أي قناة.
-- تخطي السيرفرات ذات العناوين الداخلية/الوهمية (127.0.0.1 ، 10.x ، 0.0.0.0 ...).
-- إعادة المحاولة تلقائياً عند فشل الاتصال بتيليجرام (أو حظر مؤقت 429).
-- إذا فشل أحد المنابع، يحتفظ بكونفيجاته القديمة (حسب اختصار القناة) بدل ما يمسحها.
-- يكتب:
-    sub.txt            (Base64 - رابط الاشتراك الكامل)
-    sub_raw.txt        (نص عادي)
-    subs/<Tag>.txt     (اشتراك منفصل لكل قناة - Base64)
+يكتب:
+    sub.txt      (Base64 - رابط الاشتراك الكامل)
+    sub_raw.txt  (نص عادي)
+    subs/<Tag>.txt  (اشتراك منفصل لكل قناة - Base64)
 
 لا يحتاج أي مكتبات خارجية.
 """
+
 import base64
 import html
 import ipaddress
@@ -48,61 +33,54 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 # ===================== الإعدادات =====================
-NAME_PREFIX = "Sabah"        # الاسم الجديد
-MAX_PAGES = 60               # أقصى عدد صفحات يرجع لها في تاريخ كل قناة (افتراضي)
+NAME_PREFIX = "Sabah"
+MAX_PAGES = 60          # أقصى عدد صفحات يرجع لها في تاريخ كل قناة
+PER_CHANNEL = 50        # عدد الكونفيجات من كل قناة
 
 # كل منبع:
-#   channel        : اسم القناة (بدون @)
-#   count          : عدد الكونفيجات
-#   start          : رقم أول كونفيج
-#   tag            : اختصار قصير يظهر في آخر الاسم (حروف/أرقام إنجليزية فقط بدون مسافات)
+#   channel : اسم القناة (بدون @)
+#   count   : عدد الكونفيجات
+#   start   : رقم أول كونفيج
+#   tag     : اختصار قصير يظهر في آخر الاسم (حروف/أرقام إنجليزية فقط)
 #   fallback_emoji : إيموجي بديل إذا ما عُرف علم الدولة
-#   max_pages      : (اختياري) أقصى عدد صفحات لهذه القناة
-#   legacy_range   : (اختياري) أرقام هذه القناة في النسخة القديمة (قبل إضافة الاختصار)
-#                    تُستخدم مرة وحدة فقط للاحتفاظ بالقديم إذا فشل الجلب
+# لإضافة قناة جديدة: انسخ سطر وغيّر channel و tag و start (start = آخر رقم + 50)
 SOURCES = [
-    {"channel": "TheFreeConfigs", "count": 50, "start": 1, "tag": "Free",
-     "fallback_emoji": "🌐", "legacy_range": (1, 50)},
-    {"channel": "tootffarangi2", "count": 100, "start": 51, "tag": "Toot",
-     "fallback_emoji": "🍓", "legacy_range": (51, 200)},
-    {"channel": "v2rei", "count": 100, "start": 151, "tag": "V2rei",
+    {"channel": "TheFreeConfigs", "count": PER_CHANNEL, "start": 1,   "tag": "Free",
+     "fallback_emoji": "🌐"},
+    {"channel": "tootffarangi2", "count": PER_CHANNEL, "start": 51,  "tag": "Toot",
+     "fallback_emoji": "🍓"},
+    {"channel": "v2rei", "count": PER_CHANNEL, "start": 101, "tag": "V2rei",
      "fallback_emoji": "⚡"},
-    {"channel": "proxy_mtproto_vpns_free", "count": 100, "start": 251, "tag": "Proxy",
+    {"channel": "proxy_mtproto_vpns_free", "count": PER_CHANNEL, "start": 151, "tag": "Proxy",
      "fallback_emoji": "🔰", "max_pages": 80},
-    {"channel": "ettehad_vpn", "count": 100, "start": 351, "tag": "Etehad",
+    {"channel": "ettehad_vpn", "count": PER_CHANNEL, "start": 201, "tag": "Etehad",
      "fallback_emoji": "🔥"},
+    {"channel": "DailyCfg", "count": PER_CHANNEL, "start": 251, "tag": "Daily",
+     "fallback_emoji": "📅"},
 ]
 
-# بروتوكولات يتم تخطيها تماماً (لا تدخل في الاشتراك ولا في العدد)
-# ss = Shadowsocks  ،  ssr = ShadowsocksR
+# بروتوكولات يتم تخطيها تماماً
 SKIP_PROTOCOLS = {"ss", "ssr"}
 
-USE_GEOIP = True             # True = حط علم دولة السيرفر الحقيقية (حسب الـ IP)
-# إذا الـ GeoIP قال إن السيرفر في هذه الدول وكان للكونفيج علم أصلي مختلف،
-# نخلي العلم الأصلي (لأن هذه غالباً سيرفرات "تونل/ريلاي" والخروج الحقيقي برا)
+USE_GEOIP = True
 RELAY_COUNTRIES = {"IR"}
-
-SKIP_PRIVATE_HOSTS = True    # True = تخطي السيرفرات بعناوين داخلية/وهمية (127.0.0.1 ...)
-WRITE_PER_CHANNEL = True     # True = اكتب اشتراك منفصل لكل قناة في مجلد subs/
-PAGE_DELAY = 0.4             # ثواني بين كل صفحة وصفحة (حتى ما يحظرنا تيليجرام)
+SKIP_PRIVATE_HOSTS = True   # تخطي العناوين الوهمية (127.0.0.1 ، 10.x ...). خليها False لإلغائه
+WRITE_PER_CHANNEL = True
+PAGE_DELAY = 0.4
 # =====================================================
 
 PROTOCOLS = ["hysteria2", "hysteria", "wireguard", "vless", "vmess",
              "trojan", "tuic", "ssr", "hy2", "ss"]
-# (?<![A-Za-z0-9]) حتى لا يلتقط "ss://" من داخل "vless://"
+
 LINK_RE = re.compile(r'(?<![A-Za-z0-9])(?:%s)://[^\s<>"\'`]+' % "|".join(PROTOCOLS),
                      re.IGNORECASE)
 FLAG_RE = re.compile("[\U0001F1E6-\U0001F1FF]{2}")
 NUM_RE = re.compile(r"^%s\s+(\d+)\b" % re.escape(NAME_PREFIX))
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 TAGS = {s["tag"] for s in SOURCES}
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-
-# باراميترات تؤثر على "هوية" السيرفر (الباقي شكلي ولا يدخل في كشف التكرار)
-KEY_PARAMS = ("type", "security", "sni", "pbk", "path", "servicename")
-# الـ host يدخل في المقارنة فقط مع هذه الأنواع (في tcp عادة يكون نص إعلاني)
-HOST_MATTERS = {"ws", "xhttp", "httpupgrade", "h2", "http", "splithttp"}
 
 CDN_WORDS = ("cloudflare", "fastly", "akamai", "cloudfront", "gcore", "g-core",
              "cdn77", "bunny", "edgecast", "stackpath", "arvancloud", "imperva",
@@ -111,7 +89,6 @@ CDN_WORDS = ("cloudflare", "fastly", "akamai", "cloudfront", "gcore", "g-core",
 
 # ----------------------------------------------------------------- أدوات عامة
 def fetch(url, data=None, timeout=30, retries=3):
-    """جلب صفحة مع إعادة المحاولة (مفيد عند الحظر المؤقت 429 أو انقطاع الشبكة)."""
     last = None
     for attempt in range(retries):
         req = urllib.request.Request(url, data=data,
@@ -126,7 +103,7 @@ def fetch(url, data=None, timeout=30, retries=3):
             if e.code == 404:
                 raise
             time.sleep((10 if e.code == 429 else 3) * (attempt + 1))
-        except Exception as e:                              # timeout / شبكة
+        except Exception as e:
             last = e
             time.sleep(3 * (attempt + 1))
     raise last
@@ -167,8 +144,18 @@ def norm_host(h):
     return (h or "").strip().strip("[]").rstrip(".").lower()
 
 
+def norm_user(u):
+    """UUID يتحول لحروف صغيرة. الباسوردات تبقى كما هي."""
+    u = (u or "").strip()
+    return u.lower() if UUID_RE.match(u) else u
+
+
+def make_key(user, host, port):
+    """مفتاح كشف التكرار: (UUID/باسورد) + (IP/دومين) + البورت."""
+    return f"{norm_user(user)}|{norm_host(host)}|{str(port).strip()}"
+
+
 def is_bad_host(host):
-    """True إذا كان العنوان داخلي/وهمي ما يشتغل (127.0.0.1 ، 10.x ، 0.0.0.0 ، localhost ...)."""
     if not SKIP_PRIVATE_HOSTS:
         return False
     try:
@@ -181,10 +168,7 @@ def is_bad_host(host):
 # ----------------------------------------------------------- تحليل الكونفيج
 def parse_link(link):
     """
-    يرجع dict فيه:
-      key   : مفتاح لكشف التكرار
-      host  : عنوان السيرفر
-      name  : الاسم الأصلي
+    يرجع dict فيه: key (للتكرار) ، host ، name
     أو None إذا الرابط غير صالح.
     """
     scheme = link.split("://", 1)[0].lower()
@@ -199,15 +183,11 @@ def parse_link(link):
         if not isinstance(d, dict):
             return None
         host = norm_host(str(d.get("add", "")))
-        if not host or not str(d.get("port", "")).strip() or not str(d.get("id", "")).strip():
+        port = str(d.get("port", "")).strip()
+        uid = str(d.get("id", "")).strip()
+        if not host or not port or not uid:
             return None
-        net = str(d.get("net", "")).lower()
-        parts = [host, str(d.get("port", "")), str(d.get("id", "")).lower(), net,
-                 str(d.get("tls", "")).lower(), norm_host(str(d.get("sni", ""))),
-                 str(d.get("path", ""))]
-        if net in HOST_MATTERS:
-            parts.append(norm_host(str(d.get("host", ""))))
-        return {"key": "vmess|" + "|".join(parts), "host": host,
+        return {"key": make_key(uid, host, port), "host": host,
                 "name": str(d.get("ps", ""))}
 
     base, _, frag = link.partition("#")
@@ -216,14 +196,14 @@ def parse_link(link):
     # ---------- shadowsocks
     if scheme == "ss":
         rest = base.split("://", 1)[1].split("?")[0].split("/")[0]
-        if "@" not in rest:                       # ss://BASE64(method:pass@host:port)
+        if "@" not in rest:
             try:
                 rest = b64decode_any(urllib.parse.unquote(rest))
             except Exception:
                 return None
         userinfo, _, hostport = rest.rpartition("@")
         userinfo = urllib.parse.unquote(userinfo)
-        if ":" not in userinfo:                   # userinfo بصيغة Base64
+        if ":" not in userinfo:
             try:
                 userinfo = b64decode_any(userinfo)
             except Exception:
@@ -235,7 +215,7 @@ def parse_link(link):
             return None
         if not host or not port:
             return None
-        return {"key": f"ss|{userinfo}|{host}|{port}", "host": host, "name": name}
+        return {"key": make_key(userinfo, host, port), "host": host, "name": name}
 
     # ---------- vless / trojan / hysteria / tuic / ... (صيغة URL عادية)
     try:
@@ -245,21 +225,20 @@ def parse_link(link):
         return None
     if not host:
         return None
+
     user = urllib.parse.unquote(u.username or "")
+    if u.password:                       # مثل tuic: uuid:password
+        user += ":" + urllib.parse.unquote(u.password)
     if scheme in ("vless", "trojan") and not user:
-        return None                                   # بدون UUID/باسورد = غير صالح
+        return None
     q = {k.lower(): v for k, v in urllib.parse.parse_qsl(u.query, keep_blank_values=True)}
-    parts = [scheme, user, host, str(port or "")]
-    for p in KEY_PARAMS:
-        val = q.get(p, "")
-        parts.append(norm_host(val) if p == "sni" else val)
-    if q.get("type", "tcp").lower() in HOST_MATTERS or q.get("headertype") == "http":
-        parts.append(norm_host(q.get("host", "")))
-    return {"key": "|".join(parts), "host": host, "name": name}
+    if not user:                         # بعض أنواع hysteria تضع الباسورد في الباراميترات
+        user = q.get("auth", "") or q.get("password", "")
+
+    return {"key": make_key(user, host, port or ""), "host": host, "name": name}
 
 
 def is_skipped(link):
-    """True إذا كان بروتوكول الرابط من البروتوكولات المحذوفة (مثل الشادوساكس)."""
     return link.split("://", 1)[0].lower() in SKIP_PROTOCOLS
 
 
@@ -274,13 +253,11 @@ def rename(link, new_name):
 
 
 def make_name(num, flag, tag):
-    """Sabah 151 🇩🇪 V2rei"""
     return " ".join(x for x in (NAME_PREFIX, str(num), flag, tag) if x)
 
 
 # --------------------------------------------------------------- جلب القنوات
 def parse_page(page_html, channel):
-    """يرجع [(رقم_الرسالة, [روابط...]), ...]"""
     post_re = re.compile(r'data-post="%s/(\d+)"' % re.escape(channel), re.IGNORECASE)
     messages = []
     matches = list(post_re.finditer(page_html))
@@ -294,23 +271,27 @@ def parse_page(page_html, channel):
 
 
 def collect(source, seen):
-    """يجمع أحدث الكونفيجات غير المكررة من قناة واحدة."""
+    """
+    يجمع أحدث الكونفيجات غير المكررة من قناة واحدة.
+    أي كونفيج مكرر (نفس UUID + IP + بورت) يُتخطى ويُكمل بالأقدم حتى يكتمل العدد.
+    """
     channel, limit = source["channel"], source["count"]
     max_pages = source.get("max_pages", MAX_PAGES)
     result = []
     url = f"https://t.me/s/{channel}"
+
     for page in range(max_pages):
         try:
             page_html = fetch(url)
         except Exception as e:
-            if result:                       # عندنا شي -> نكتفي به بدل ما نخسر الكل
+            if result:
                 print(f"  @{channel}: توقف عند الصفحة {page + 1} ({e})")
                 break
             raise
         messages = parse_page(page_html, channel)
         if not messages:
             break
-        # الأحدث أولاً، مع الحفاظ على ترتيب الكونفيجات داخل نفس الرسالة
+
         for _msg_id, links in sorted(messages, key=lambda x: -x[0]):
             for link in links:
                 if is_skipped(link):
@@ -323,6 +304,7 @@ def collect(source, seen):
                 result.append(info)
                 if len(result) >= limit:
                     return result
+
         oldest = min(m[0] for m in messages)
         if oldest <= 1:
             break
@@ -335,7 +317,7 @@ def collect(source, seen):
 def resolve(host):
     try:
         socket.inet_pton(socket.AF_INET6 if ":" in host else socket.AF_INET, host)
-        return host                                   # هو IP أصلاً
+        return host
     except OSError:
         pass
     try:
@@ -345,18 +327,17 @@ def resolve(host):
 
 
 def geoip(hosts):
-    """يرجع {host: (country_code, is_cdn)}"""
     socket.setdefaulttimeout(5)
     hosts = sorted(set(hosts))
     with ThreadPoolExecutor(max_workers=32) as ex:
         ips = dict(zip(hosts, ex.map(resolve, hosts)))
-
     unique_ips = sorted({ip for ip in ips.values() if ip})
+
     info = {}
-    for n, i in enumerate(range(0, len(unique_ips), 100)):   # ip-api يقبل 100 لكل طلب
+    for n, i in enumerate(range(0, len(unique_ips), 100)):
         chunk = unique_ips[i:i + 100]
         if n:
-            time.sleep(4.5)                            # حد ip-api: 15 طلب batch بالدقيقة
+            time.sleep(4.5)
         try:
             res = json.loads(fetch(
                 "http://ip-api.com/batch?fields=status,countryCode,isp,org,as,query",
@@ -370,14 +351,13 @@ def geoip(hosts):
             blob = " ".join(str(r.get(k, "")) for k in ("isp", "org", "as")).lower()
             info[r["query"]] = (r.get("countryCode", ""),
                                 any(w in blob for w in CDN_WORDS))
-
     return {h: info.get(ip) for h, ip in ips.items() if ip and ip in info}
 
 
 def choose_flag(cfg, geo, fallback):
     original = get_flag(cfg["name"])
     g = geo.get(cfg["host"])
-    if g and g[0] and not g[1]:                        # موجود وليس CDN
+    if g and g[0] and not g[1]:
         cc = g[0].upper()
         if cc in RELAY_COUNTRIES and original and flag_to_cc(original) != cc:
             return original
@@ -387,7 +367,7 @@ def choose_flag(cfg, geo, fallback):
 
 # -------------------------------------------------- الاحتفاظ بالقديم عند الفشل
 def load_previous():
-    """يرجع [(رقم, اختصار_القناة أو "", العلم, رابط), ...] من sub_raw.txt القديم."""
+    """يرجع [(رقم, اختصار_القناة, العلم, رابط), ...] من sub_raw.txt القديم."""
     old = []
     try:
         with open("sub_raw.txt", encoding="utf-8") as f:
@@ -411,12 +391,7 @@ def load_previous():
 
 
 def kept_for_source(src, previous):
-    """الكونفيجات القديمة الخاصة بهذا المنبع (حسب الاختصار، أو حسب الأرقام القديمة)."""
     kept = [(flag, link) for num, tag, flag, link in sorted(previous) if tag == src["tag"]]
-    if not kept and src.get("legacy_range"):
-        a, b = src["legacy_range"]
-        kept = [(flag, link) for num, tag, flag, link in sorted(previous)
-                if not tag and a <= num <= b]
     out = []
     for i, (flag, link) in enumerate(kept[:src["count"]]):
         try:
@@ -472,7 +447,6 @@ def main():
     for src, cfgs in zip(SOURCES, per_source):
         lines = []
         if not cfgs:
-            # المنبع فشل/فاضي -> نحتفظ بكونفيجاته القديمة
             if previous is None:
                 previous = load_previous()
             lines = kept_for_source(src, previous)
@@ -502,7 +476,7 @@ def main():
     print(f"تم: {len(final)} كونفيج")
     for tag, lines in by_tag.items():
         if lines:
-            print(f"  [{tag}] {len(lines)} ->", urllib.parse.unquote(lines[0])[-30:])
+            print(f"  [{tag}] {len(lines)}")
 
 
 if __name__ == "__main__":
