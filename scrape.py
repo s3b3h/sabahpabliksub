@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-يجلب أحدث الكونفيجات من عدة قنوات تيليجرام عامة (عن طريق صفحة المعاينة t.me/s/...)
-ويبني ملف اشتراك (Subscription) لبرنامج v2rayNG.
+Sabah Public Sub - يجلب الكونفيجات من قنوات تيليجرام عامة، يحذف المكرر، يختبر كل
+كونفيج اختبار حقيقي (اتصال + انستقرام + سرعة) عن طريق Xray، ويبني اشتراك v2rayNG / Happ.
 
 - من كل قناة: آخر 50 كونفيج (بدون أي فلتر فحص اتصال/إنترنت).
 - حذف المكرر: إذا تطابق (UUID/الباسورد + عنوان السيرفر IP + البورت) يُحذف الكونفيج،
@@ -21,16 +21,21 @@
 import base64
 import html
 import ipaddress
+import itertools
 import json
 import os
 import re
 import socket
+import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 # ===================== الإعدادات =====================
 NAME_PREFIX = "Sabah"
@@ -74,13 +79,16 @@ PROTOCOLS = ["hysteria2", "hysteria", "wireguard", "vless", "vmess",
 
 LINK_RE = re.compile(r'(?<![A-Za-z0-9])(?:%s)://[^\s<>"\'`]+' % "|".join(PROTOCOLS),
                      re.IGNORECASE)
+HREF_RE = re.compile(r'href="([^"]+)"', re.IGNORECASE)
+TIME_RE = re.compile(r'<time[^>]*datetime="([^"]+)"', re.IGNORECASE)
+MT_RE = re.compile(r'(?:tg://proxy|t\.me/proxy|tg://socks|t\.me/socks)\?', re.IGNORECASE)
 FLAG_RE = re.compile("[\U0001F1E6-\U0001F1FF]{2}")
 NUM_RE = re.compile(r"^%s\s+(\d+)\b" % re.escape(NAME_PREFIX))
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 TAGS = {s["tag"] for s in SOURCES}
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+      "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
 
 CDN_WORDS = ("cloudflare", "fastly", "akamai", "cloudfront", "gcore", "g-core",
              "cdn77", "bunny", "edgecast", "stackpath", "arvancloud", "imperva",
@@ -91,10 +99,8 @@ CDN_WORDS = ("cloudflare", "fastly", "akamai", "cloudfront", "gcore", "g-core",
 def fetch(url, data=None, timeout=30, retries=3):
     last = None
     for attempt in range(retries):
-        req = urllib.request.Request(url, data=data,
-                                     headers={"User-Agent": UA,
-                                              "Accept-Language": "en-US,en;q=0.9",
-                                              "Content-Type": "application/json"})
+        req = urllib.request.Request(url, data=data, headers={
+            "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.read().decode("utf-8", "replace")
@@ -134,12 +140,6 @@ def cc_to_flag(cc):
     return "".join(chr(0x1F1E6 + ord(c) - 65) for c in cc)
 
 
-def flag_to_cc(flag):
-    if not flag or len(flag) != 2:
-        return ""
-    return "".join(chr(ord(c) - 0x1F1E6 + 65) for c in flag)
-
-
 def norm_host(h):
     return (h or "").strip().strip("[]").rstrip(".").lower()
 
@@ -165,16 +165,23 @@ def is_bad_host(host):
     return not ip.is_global
 
 
+def is_skipped(link):
+    return link.split("://", 1)[0].lower() in SKIP_PROTOCOLS
+
+
 # ----------------------------------------------------------- تحليل الكونفيج
 def parse_link(link):
     """
     يرجع dict فيه: key (للتكرار) ، host ، name
     أو None إذا الرابط غير صالح.
     """
-    scheme = link.split("://", 1)[0].lower()
-    body = link.split("://", 1)[1]
+    try:
+        scheme = link.split("://", 1)[0].lower()
+        body = link.split("://", 1)[1]
+    except IndexError:
+        return None
+    fam = "hysteria2" if scheme in ("hy2", "hysteria2") else scheme
 
-    # ---------- vmess (Base64 JSON)
     if scheme == "vmess":
         try:
             d = json.loads(b64decode_any(body.split("#")[0]))
@@ -209,7 +216,7 @@ def parse_link(link):
             except Exception:
                 return None
         try:
-            u = urllib.parse.urlsplit("ss://x@" + hostport)
+            u = urllib.parse.urlsplit(base)
             host, port = norm_host(u.hostname), u.port
         except Exception:
             return None
@@ -261,13 +268,21 @@ def parse_page(page_html, channel):
     post_re = re.compile(r'data-post="%s/(\d+)"' % re.escape(channel), re.IGNORECASE)
     messages = []
     matches = list(post_re.finditer(page_html))
+    messages, real = [], ""
     for i, m in enumerate(matches):
-        start = m.end()
+        real = real or m.group(1)
         end = matches[i + 1].start() if i + 1 < len(matches) else len(page_html)
-        text = html_to_text(page_html[start:end])
-        links = [l.rstrip(".,;)]}") for l in LINK_RE.findall(text)]
-        messages.append((int(m.group(1)), links))
-    return messages
+        block = page_html[m.end():end]
+        links = [l.rstrip(".,;)]}") for l in LINK_RE.findall(html_to_text(block))]
+        for href in HREF_RE.findall(block):
+            href = html.unescape(href).strip()
+            if LINK_RE.match(href):
+                links.append(href.rstrip(".,;)]}"))
+        links = list(dict.fromkeys(links))
+        t = TIME_RE.search(block)
+        messages.append((int(m.group(2)), parse_date(t.group(1)) if t else 0.0,
+                         links, len(MT_RE.findall(html.unescape(block)))))
+    return messages, real
 
 
 def collect(source, seen):
@@ -282,25 +297,34 @@ def collect(source, seen):
 
     for page in range(max_pages):
         try:
-            page_html = fetch(url)
+            page_html = fetch(url0)
         except Exception as e:
             if result:
                 print(f"  @{channel}: توقف عند الصفحة {page + 1} ({e})")
                 break
-            raise
-        messages = parse_page(page_html, channel)
+        st["pages"] += 1
+        messages, _ = parse_page(page_html)
         if not messages:
             break
 
         for _msg_id, links in sorted(messages, key=lambda x: -x[0]):
             for link in links:
                 if is_skipped(link):
+                    st["ss"] += 1
                     continue
                 info = parse_link(link)
-                if not info or info["key"] in seen or is_bad_host(info["host"]):
+                if not info:
+                    st["bad"] += 1
                     continue
-                seen.add(info["key"])
-                info["link"] = link
+                if is_bad_host(info["host"]):
+                    st["private"] += 1
+                    continue
+                k = f"{info['fam']}|{info['user']}|{info['host']}|{info['port']}"
+                if k in seen:
+                    st["dup"] += 1
+                    continue
+                seen.add(k)
+                info.update(link=link, date=date, msg_id=msg_id, pos=pos, src=src_idx)
                 result.append(info)
                 if len(result) >= limit:
                     return result
@@ -308,13 +332,18 @@ def collect(source, seen):
         oldest = min(m[0] for m in messages)
         if oldest <= 1:
             break
-        url = f"https://t.me/s/{channel}?before={oldest}"
+        url = f"{base}?before={oldest}"
         time.sleep(PAGE_DELAY)
+
+    print(f"  [{channel}] صفحات={st['pages']} رسائل={st['msgs']} روابط={st['raw']} | "
+          f"مكرر={st['dup']} ss={st['ss']} غير_صالح={st['bad']} داخلي={st['private']} | "
+          f"MTProto={st['mtproto']} | مرشح={len(result)}")
     return result
 
 
-# ---------------------------------------------------------------- GeoIP
-def resolve(host):
+def load_previous(src_idx, tag):
+    """الكونفيجات القديمة لقناة معينة من sub_raw.txt (تُستخدم إذا فشل جلب القناة)."""
+    out = []
     try:
         socket.inet_pton(socket.AF_INET6 if ":" in host else socket.AF_INET, host)
         return host
@@ -328,7 +357,7 @@ def resolve(host):
 
 def geoip(hosts):
     socket.setdefaulttimeout(5)
-    hosts = sorted(set(hosts))
+    hosts = sorted({c["host"] for c in cands})
     with ThreadPoolExecutor(max_workers=32) as ex:
         ips = dict(zip(hosts, ex.map(resolve, hosts)))
     unique_ips = sorted({ip for ip in ips.values() if ip})
@@ -370,24 +399,11 @@ def load_previous():
     """يرجع [(رقم, اختصار_القناة, العلم, رابط), ...] من sub_raw.txt القديم."""
     old = []
     try:
-        with open("sub_raw.txt", encoding="utf-8") as f:
-            lines = [l.strip() for l in f if l.strip()]
-    except FileNotFoundError:
-        return old
-    for line in lines:
-        if is_skipped(line):
-            continue
-        info = parse_link(line)
-        if not info:
-            continue
-        name = info["name"].strip()
-        m = NUM_RE.match(name)
-        if not m:
-            continue
-        words = name.split()
-        tag = words[-1] if words and words[-1] in TAGS else ""
-        old.append((int(m.group(1)), tag, get_flag(name), line))
-    return old
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 5)
+        code, t, sp, size = r.stdout.split()
+        return int(code), float(t), float(sp), int(float(size))
+    except Exception:
+        return 0, 0.0, 0.0, 0
 
 
 def kept_for_source(src, previous):
@@ -395,11 +411,134 @@ def kept_for_source(src, previous):
     out = []
     for i, (flag, link) in enumerate(kept[:src["count"]]):
         try:
-            out.append(rename(link, make_name(src["start"] + i,
-                                              flag or src["fallback_emoji"], src["tag"])))
+            with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
+
+
+def test_one(c, workdir):
+    """يرجع dict: ok, reason, delay, speed, cc, exit_ip"""
+    res = {"ok": False, "reason": "", "delay": 0, "speed": 0.0, "cc": "", "exit_ip": "", "ig": False}
+    if (SKIP_UNENCRYPTED and c["scheme"] in ("vless", "trojan") and c["sec"] in ("", "none")
+            and c["p"].get("encryption", "none") in ("", "none")):
+        res["reason"] = "no_tls"
+        return res
+    ob = build_outbound(c)
+    if ob is None:
+        res["reason"] = "unsupported"
+        return res
+    port = next_port()
+    cfg = {"log": {"loglevel": "none"},
+           "inbounds": [{"listen": "127.0.0.1", "port": port, "protocol": "socks",
+                         "settings": {"udp": False}}],
+           "outbounds": [ob]}
+    cfg_path = os.path.join(workdir, f"{port}.json")
+    body_path = os.path.join(workdir, f"{port}.html")
+    with open(cfg_path, "w") as f:
+        json.dump(cfg, f)
+    proc = subprocess.Popen([XRAY_PATH, "run", "-c", cfg_path],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_port(port, proc):
+            res["reason"] = "invalid"
+            return res
+        # 1) Delay حقيقي (محاولتين لأن السيرفرات المجانية متذبذبة)
+        delay = 0
+        for _ in range(2):
+            code, t, _, _ = curl(port, DELAY_URL, DELAY_TIMEOUT)
+            if code in (200, 204):
+                delay = int(t * 1000)
+                break
+        if not delay:
+            res["reason"] = "dead"
+            return res
+        res["delay"] = delay
+        if delay > MAX_DELAY_MS:
+            res["reason"] = "high_delay"
+            return res
+        # 2) انستقرام
+        code, _, _, size = curl(port, INSTAGRAM_URLS[0], INSTAGRAM_TIMEOUT, out=body_path)
+        ok_web = False
+        if 200 <= code < 400:
+            try:
+                with open(body_path, "rb") as f:
+                    ok_web = code >= 300 or b"instagram" in f.read().lower()
+            except OSError:
+                pass
+        ok_api = ok_web and all(curl(port, u, INSTAGRAM_TIMEOUT)[0] > 0 for u in INSTAGRAM_URLS[1:])
+        res["ig"] = ok_web and ok_api
+        if REQUIRE_INSTAGRAM and not res["ig"]:
+            res["reason"] = "no_instagram"
+            return res
+        # 3) السرعة
+        for url in SPEED_URLS:
+            code, _, sp, size = curl(port, url, SPEED_TIMEOUT)
+            if size > 100_000:
+                res["speed"] = round(sp * 8 / 1_000_000, 2)
+                break
+        if MIN_SPEED_MBPS and res["speed"] < MIN_SPEED_MBPS:
+            res["reason"] = "slow"
+            return res
+        # 4) دولة و IP الخروج الحقيقي
+        for url in EXIT_INFO_URLS:
+            code, _, _, _ = curl(port, url, 8, out=body_path)
+            if code != 200:
+                continue
+            try:
+                with open(body_path, encoding="utf-8", errors="replace") as f:
+                    data = f.read()
+            except OSError:
+                continue
+            if "cdn-cgi/trace" in url:
+                kv = dict(l.split("=", 1) for l in data.splitlines() if "=" in l)
+                res["exit_ip"], res["cc"] = kv.get("ip", ""), kv.get("loc", "")
+            else:
+                try:
+                    j = json.loads(data)
+                    res["exit_ip"], res["cc"] = j.get("ip", ""), j.get("country", "")
+                except Exception:
+                    pass
+            if res["exit_ip"]:
+                break
+        if res["cc"] in ("XX", "T1"):
+            res["cc"] = ""
+        res["ok"] = True
+        return res
+    finally:
+        proc.kill()
+        try:
+            proc.wait(timeout=3)
         except Exception:
-            continue
-    return out
+            pass
+        for pth in (cfg_path, body_path):
+            try:
+                os.remove(pth)
+            except OSError:
+                pass
+
+
+def test_all(cands):
+    workdir = tempfile.mkdtemp(prefix="xtest_")
+    done = [0]
+    lock = threading.Lock()
+    t0 = time.time()
+
+    def run(c):
+        try:
+            c["test"] = test_one(c, workdir)
+        except Exception as e:
+            c["test"] = {"ok": False, "reason": f"error:{e}", "delay": 0, "speed": 0.0,
+                         "cc": "", "exit_ip": "", "ig": False}
+        with lock:
+            done[0] += 1
+            if done[0] % 50 == 0 or done[0] == len(cands):
+                ok = sum(1 for x in cands if x.get("test", {}).get("ok"))
+                print(f"  اختبار: {done[0]}/{len(cands)}  ناجح={ok}  ({time.time() - t0:.0f}s)")
+
+    with ThreadPoolExecutor(max_workers=TEST_WORKERS) as ex:
+        list(ex.map(run, cands))
 
 
 # ------------------------------------------------------------------ main
@@ -407,39 +546,45 @@ def write_sub(path, lines):
     raw = "\n".join(lines) + "\n" if lines else ""
     with open(path, "w", encoding="utf-8") as f:
         f.write(base64.b64encode(raw.encode("utf-8")).decode())
-    return raw
+
+
+def check_xray():
+    try:
+        r = subprocess.run([XRAY_PATH, "version"], capture_output=True, text=True, timeout=10)
+        print("Xray:", r.stdout.splitlines()[0])
+        return True
+    except Exception as e:
+        print(f"خطأ: ما لقيت xray في {XRAY_PATH} ({e})")
+        return False
 
 
 def main():
-    seen = set()
-    per_source = []
-    any_new = False
+    if ENABLE_TEST and not check_xray():
+        sys.exit(1)
 
-    for src in SOURCES:
+    # 1) الجلب
+    cands, fetched = [], {}
+    for i, src in enumerate(SOURCES):
         t0 = time.time()
         try:
-            cfgs = collect(src, seen)
-            print(f"@{src['channel']}: {len(cfgs)}/{src['count']} كونفيج "
-                  f"({time.time() - t0:.0f}s)")
+            got = collect(i, src)
         except Exception as e:
             print(f"@{src['channel']}: خطأ أثناء الجلب -> {e}")
-            cfgs = None
-        if cfgs:
-            any_new = True
-        per_source.append(cfgs)
-
-    if not any_new:
+            got = []
+        if not got:
+            got = load_previous(i, src["tag"])
+            print(f"@{src['channel']}: فشل الجلب، إعادة اختبار {len(got)} كونفيج قديم")
+        else:
+            print(f"@{src['channel']}: {len(got)} مرشح ({time.time() - t0:.0f}s)")
+        fetched[src["tag"]] = len(got)
+        cands.extend(got)
+    if not cands:
         print("لم يتم العثور على أي كونفيج - لن يتم تعديل الملفات.")
         sys.exit(1)
 
-    geo = {}
-    if USE_GEOIP:
-        hosts = [c["host"] for cfgs in per_source if cfgs for c in cfgs]
-        try:
-            geo = geoip(hosts)
-            print(f"GeoIP: تم تحديد دولة {len(geo)} من {len(set(hosts))} سيرفر")
-        except Exception as e:
-            print("تحذير: GeoIP فشل بالكامل:", e)
+    # 2) حذف المكرر عبر كل القنوات
+    cands, dups = dedupe(cands)
+    print(f"بعد حذف المكرر: {len(cands)} (محذوف {dups} مكرر)")
 
     previous = None
     final = []
@@ -459,21 +604,50 @@ def main():
                                         make_name(src["start"] + i, flag, src["tag"])))
                 except Exception:
                     continue
-        by_tag[src["tag"]] = lines
-        final.extend(lines)
+            keep.append(c)
+        print(f"حذف مكرر IP الخروج: {len(passed) - len(keep)}")
+        passed = keep
 
-    raw = "\n".join(final) + "\n"
+    # 5) الترتيب: الأحدث = رقم 1 ، مع حد لكل قناة
+    passed.sort(key=sort_key)
+    per_src, final_cfgs = {}, []
+    for c in passed:
+        n = per_src.get(c["src"], 0)
+        if n >= SOURCES[c["src"]]["count"]:
+            continue
+        per_src[c["src"]] = n + 1
+        final_cfgs.append(c)
+    if MAX_TOTAL:
+        final_cfgs = final_cfgs[:MAX_TOTAL]
+    if not final_cfgs:
+        print("ولا كونفيج نجح في الاختبار - لن يتم تعديل الملفات.")
+        sys.exit(1)
+
+    # 6) التسمية والكتابة
+    final, by_tag, rows = [], {s["tag"]: [] for s in SOURCES}, []
+    for num, c in enumerate(final_cfgs, 1):
+        src = SOURCES[c["src"]]
+        flag = cc_to_flag(c["test"]["cc"]) or get_flag(c["name"]) or src["fallback_emoji"]
+        try:
+            line = rename(c["link"], make_name(num, flag, src["tag"]))
+        except Exception:
+            continue
+        final.append(line)
+        by_tag[src["tag"]].append(line)
+        rows.append((num, flag, src["tag"], c["scheme"], c["net"], c["sec"] or "none",
+                     c["test"]["delay"], c["test"]["speed"],
+                     datetime.fromtimestamp(c["date"], timezone.utc).strftime("%m-%d %H:%M") if c["date"] else "-"))
+
     with open("sub_raw.txt", "w", encoding="utf-8") as f:
-        f.write(raw)
+        f.write("\n".join(final) + "\n")
     write_sub("sub.txt", final)
-
     if WRITE_PER_CHANNEL:
         os.makedirs("subs", exist_ok=True)
         for tag, lines in by_tag.items():
             if lines:
                 write_sub(os.path.join("subs", f"{tag}.txt"), lines)
 
-    print(f"تم: {len(final)} كونفيج")
+    print(f"تم: {len(final)} كونفيج شغال")
     for tag, lines in by_tag.items():
         if lines:
             print(f"  [{tag}] {len(lines)}")
