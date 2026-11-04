@@ -51,7 +51,7 @@ SOURCES = [
      "fallback_emoji": "🍓"},
     {"channel": "v2rei", "count": PER_CHANNEL, "start": 101, "tag": "V2rei",
      "fallback_emoji": "⚡"},
-    {"channel": "proxy_mtproto_vpns_free", "count": PER_CHANNEL, "start": 151, "tag": "Proxy",
+    {"channel": "proxyfree", "count": PER_CHANNEL, "start": 151, "tag": "Proxy",
      "fallback_emoji": "🔰", "max_pages": 150},
     {"channel": "ettehad_vpn", "count": PER_CHANNEL, "start": 201, "tag": "Etehad",
      "fallback_emoji": "🔥"},

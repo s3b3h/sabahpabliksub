@@ -9,7 +9,7 @@
 | @TheFreeConfigs | Sabah 1 → 50 | Free |
 | @tootffarangi2 | Sabah 51 → 100 | Toot |
 | @v2rei | Sabah 101 → 150 | V2rei |
-| @proxy_mtproto_vpns_free | Sabah 151 → 200 | Proxy |
+| @proxyfree | Sabah 151 → 200 | Proxy |
 | @ettehad_vpn | Sabah 201 → 250 | Etehad |
 | @DailyCfg | Sabah 251 → 300 | Daily |
 | @v2ray_dalghak | Sabah 301 → 350 | Dalghak |
