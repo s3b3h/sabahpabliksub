@@ -52,11 +52,13 @@ SOURCES = [
     {"channel": "v2rei", "count": PER_CHANNEL, "start": 101, "tag": "V2rei",
      "fallback_emoji": "⚡"},
     {"channel": "proxy_mtproto_vpns_free", "count": PER_CHANNEL, "start": 151, "tag": "Proxy",
-     "fallback_emoji": "🔰", "max_pages": 80},
+     "fallback_emoji": "🔰", "max_pages": 150},
     {"channel": "ettehad_vpn", "count": PER_CHANNEL, "start": 201, "tag": "Etehad",
      "fallback_emoji": "🔥"},
     {"channel": "DailyCfg", "count": PER_CHANNEL, "start": 251, "tag": "Daily",
      "fallback_emoji": "📅"},
+    {"channel": "v2ray_dalghak", "count": PER_CHANNEL, "start": 301, "tag": "Dalghak",
+     "fallback_emoji": "🤡"},
 ]
 
 # بروتوكولات يتم تخطيها تماماً
@@ -74,6 +76,10 @@ PROTOCOLS = ["hysteria2", "hysteria", "wireguard", "vless", "vmess",
 
 LINK_RE = re.compile(r'(?<![A-Za-z0-9])(?:%s)://[^\s<>"\'`]+' % "|".join(PROTOCOLS),
                      re.IGNORECASE)
+# روابط بروكسي تيليجرام (MTProto / SOCKS) - ليست كونفيجات v2ray، تُتخطى دائماً
+PROXY_RE = re.compile(r'(?:tg://|https?://(?:www\.)?t\.me/)(?:proxy|socks)\?', re.IGNORECASE)
+HREF_RE = re.compile(r'href="([^"]+)"', re.IGNORECASE)
+STATS = {}   # إحصائيات كل قناة (للتشخيص)
 FLAG_RE = re.compile("[\U0001F1E6-\U0001F1FF]{2}")
 NUM_RE = re.compile(r"^%s\s+(\d+)\b" % re.escape(NAME_PREFIX))
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -187,8 +193,8 @@ def parse_link(link):
         uid = str(d.get("id", "")).strip()
         if not host or not port or not uid:
             return None
-        return {"key": make_key(uid, host, port), "host": host,
-                "name": str(d.get("ps", ""))}
+        return {"key": make_key(uid, host, port), "host": host, "user": uid,
+                "port": port, "name": str(d.get("ps", ""))}
 
     base, _, frag = link.partition("#")
     name = urllib.parse.unquote(frag)
@@ -215,7 +221,8 @@ def parse_link(link):
             return None
         if not host or not port:
             return None
-        return {"key": make_key(userinfo, host, port), "host": host, "name": name}
+        return {"key": make_key(userinfo, host, port), "host": host,
+                "user": userinfo, "port": port, "name": name}
 
     # ---------- vless / trojan / hysteria / tuic / ... (صيغة URL عادية)
     try:
@@ -235,7 +242,45 @@ def parse_link(link):
     if not user:                         # بعض أنواع hysteria تضع الباسورد في الباراميترات
         user = q.get("auth", "") or q.get("password", "")
 
-    return {"key": make_key(user, host, port or ""), "host": host, "name": name}
+    return {"key": make_key(user, host, port or ""), "host": host,
+            "user": user, "port": port or "", "name": name}
+
+
+_DNS = {}
+
+
+def is_ip(h):
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        return False
+
+
+def resolve_many(hosts):
+    """يحوّل الدومينات إلى IP (بالتوازي) ويخزنها، عشان نكشف التكرار حتى لو
+    كان أحدهم بدومين والثاني بالـ IP نفسه."""
+    todo = [h for h in set(hosts) if h and not is_ip(h) and h not in _DNS]
+    if not todo:
+        return
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        for h, ip in zip(todo, ex.map(resolve, todo)):
+            _DNS[h] = ip
+
+
+def ip_key(info):
+    """مفتاح التكرار بعد تحويل الدومين إلى IP (إن أمكن)."""
+    h = info["host"]
+    return make_key(info.get("user", ""), _DNS.get(h) or h, info.get("port", ""))
+
+
+def is_dup(info, seen):
+    return info["key"] in seen or ip_key(info) in seen
+
+
+def mark_seen(info, seen):
+    seen.add(info["key"])
+    seen.add(ip_key(info))
 
 
 def is_skipped(link):
@@ -258,15 +303,25 @@ def make_name(num, flag, tag):
 
 # --------------------------------------------------------------- جلب القنوات
 def parse_page(page_html, channel):
+    """يرجع [(رقم_الرسالة, [روابط الكونفيج], عدد_روابط_البروكسي)]"""
     post_re = re.compile(r'data-post="%s/(\d+)"' % re.escape(channel), re.IGNORECASE)
     messages = []
     matches = list(post_re.finditer(page_html))
     for i, m in enumerate(matches):
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(page_html)
-        text = html_to_text(page_html[start:end])
+        segment = page_html[start:end]
+        text = html_to_text(segment)
         links = [l.rstrip(".,;)]}") for l in LINK_RE.findall(text)]
-        messages.append((int(m.group(1)), links))
+        # الروابط المخفية خلف نص (مثل: [انسخ الكونفيج](vless://...))
+        hrefs = [html.unescape(h) for h in HREF_RE.findall(segment)]
+        for h in hrefs:
+            if LINK_RE.match(h):
+                h = h.rstrip(".,;)]}")
+                if h not in links:
+                    links.append(h)
+        nproxy = len(PROXY_RE.findall(text)) + sum(1 for h in hrefs if PROXY_RE.match(h))
+        messages.append((int(m.group(1)), links, nproxy))
     return messages
 
 
@@ -278,6 +333,7 @@ def collect(source, seen):
     channel, limit = source["channel"], source["count"]
     max_pages = source.get("max_pages", MAX_PAGES)
     result = []
+    st = STATS[channel] = {"pages": 0, "posts": 0, "proxy": 0, "configs": 0, "note": ""}
     url = f"https://t.me/s/{channel}"
 
     for page in range(max_pages):
@@ -289,21 +345,33 @@ def collect(source, seen):
                 break
             raise
         messages = parse_page(page_html, channel)
+        st["pages"] += 1
         if not messages:
+            if page == 0:
+                st["note"] = "لا توجد منشورات في صفحة المعاينة (ربما المعاينة معطلة للقناة)"
             break
+        st["posts"] += len(messages)
+        st["proxy"] += sum(m[2] for m in messages)
 
-        for _msg_id, links in sorted(messages, key=lambda x: -x[0]):
+        ordered = []
+        for _msg_id, links, _np in sorted(messages, key=lambda x: -x[0]):
             for link in links:
+                st["configs"] += 1
                 if is_skipped(link):
                     continue
                 info = parse_link(link)
-                if not info or info["key"] in seen or is_bad_host(info["host"]):
-                    continue
-                seen.add(info["key"])
-                info["link"] = link
-                result.append(info)
-                if len(result) >= limit:
-                    return result
+                if info:
+                    info["link"] = link
+                    ordered.append(info)
+        resolve_many([i["host"] for i in ordered])
+
+        for info in ordered:
+            if is_dup(info, seen) or is_bad_host(info["host"]):
+                continue
+            mark_seen(info, seen)
+            result.append(info)
+            if len(result) >= limit:
+                return result
 
         oldest = min(m[0] for m in messages)
         if oldest <= 1:
@@ -462,6 +530,23 @@ def main():
         by_tag[src["tag"]] = lines
         final.extend(lines)
 
+    # فحص نهائي: يحذف أي مكرر تبقى (مثلاً بين كونفيجات قديمة محتفظ بها وجديدة)
+    all_infos = {t: [(l, parse_link(l)) for l in ls] for t, ls in by_tag.items()}
+    resolve_many([i["host"] for ls in all_infos.values() for _, i in ls if i])
+    final_seen = set()
+    final = []
+    for tag, pairs in all_infos.items():
+        kept = []
+        for line, info in pairs:
+            if info and is_dup(info, final_seen):
+                print(f"  حذف مكرر نهائي [{tag}]: {info['host']}:{info['port']}")
+                continue
+            if info:
+                mark_seen(info, final_seen)
+            kept.append(line)
+        by_tag[tag] = kept
+        final.extend(kept)
+
     raw = "\n".join(final) + "\n"
     with open("sub_raw.txt", "w", encoding="utf-8") as f:
         f.write(raw)
@@ -474,9 +559,20 @@ def main():
                 write_sub(os.path.join("subs", f"{tag}.txt"), lines)
 
     print(f"تم: {len(final)} كونفيج")
-    for tag, lines in by_tag.items():
-        if lines:
-            print(f"  [{tag}] {len(lines)}")
+    summary = [f"### المجموع: {len(final)} كونفيج", "", "| القناة | العدد | صفحات / منشورات / بروكسي / كونفيج |", "|---|---|---|"]
+    for src in SOURCES:
+        n = len(by_tag.get(src["tag"], []))
+        print(f"  [{src['tag']}] {n}" + ("   <-- ناقص!" if n < src["count"] else ""))
+        st = STATS.get(src["channel"], {})
+        if n < src["count"] and st:
+            print(f"      تشخيص: صفحات={st['pages']} منشورات={st['posts']} "
+                  f"روابط بروكسي={st['proxy']} روابط كونفيج={st['configs']} {st['note']}")
+        summary.append(f"| @{src['channel']} | {n} / {src['count']} | "
+                       f"{st.get('pages', 0)} / {st.get('posts', 0)} / {st.get('proxy', 0)} / {st.get('configs', 0)} |")
+    gh = os.environ.get("GITHUB_STEP_SUMMARY")
+    if gh:
+        with open(gh, "a", encoding="utf-8") as f:
+            f.write("\n".join(summary) + "\n")
 
 
 if __name__ == "__main__":

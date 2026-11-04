@@ -12,6 +12,7 @@
 | @proxy_mtproto_vpns_free | Sabah 151 → 200 | Proxy |
 | @ettehad_vpn | Sabah 201 → 250 | Etehad |
 | @DailyCfg | Sabah 251 → 300 | Daily |
+| @v2ray_dalghak | Sabah 301 → 350 | Dalghak |
 
 ## المميزات
 
